@@ -41,6 +41,10 @@ def render_extraction_results(result: ExtractionResult):
     is_convocacao = "nome_convocado" in data or "datas_identificadas" in data
 
     if is_convocacao and "nome_convocado" in data:
+        local_vot = data.get('local_votacao', 'Local não informado')
+        endereco_vot = data.get('endereco_local_votacao', '')
+        local_completo = f"{local_vot} — {endereco_vot}" if endereco_vot and endereco_vot != "Não especificado" else local_vot
+
         st.markdown(
             f"""
             <div style="background: linear-gradient(135deg, #1e3a8a 0%, #1e40af 100%); color: white; border-radius: 12px; padding: 22px; margin-bottom: 24px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);">
@@ -55,7 +59,7 @@ def render_extraction_results(result: ExtractionResult):
                     <div><strong>Pleito:</strong> {data.get('eleicao', 'Eleições')}</div>
                 </div>
                 <div style="margin-top: 10px; font-size: 0.9rem; opacity: 0.9; border-top: 1px solid rgba(255,255,255,0.2); padding-top: 8px;">
-                    <strong>Local de Votação:</strong> {data.get('local_votacao', 'Local')} — {data.get('endereco_local_votacao', '')}
+                    <strong>Local de Votação:</strong> {local_completo}
                 </div>
             </div>
             """,

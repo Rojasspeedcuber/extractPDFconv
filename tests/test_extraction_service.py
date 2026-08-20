@@ -64,6 +64,43 @@ def test_election_summons_extractor():
     assert datas["transferencia_temporaria"]["inicio"] == "20/07/2026"
     assert "25 de junho de 2026" in datas["data_emissao"]
 
+
+def test_election_summons_full_name_variations():
+    """Valida a extração de nomes compostos e completos em diversos formatos de convocação."""
+    extractor = ElectionSummonsExtractor()
+
+    # Caso 1: Nome com quebra de linha e preposições (ex: MARIA DA CONCEIÇÃO SILVA)
+    text_maria = """
+    TRIBUNAL REGIONAL ELEITORAL DE PERNAMBUCO
+    CARTA CONVOCATÓRIA
+    A Juíza da 8ª Zona Eleitoral convoca o(a) Sr(a).
+    MARIA
+    DA CONCEIÇÃO SILVA para atuar, nas ELEIÇÕES GERAIS 2026, como
+    ADMINISTRADOR(A) DE PRÉDIO, no Local de Votação PARÓQUIA DE SANTO ANTONIO ÁGUA FRIA/ARRUDA, situado na RUA CORONEL SEVERINO, 120, onde deverá comparecer...
+    """
+    res1 = extractor.extract(text_maria, [text_maria], {})
+    assert res1["nome_convocado"] == "MARIA DA CONCEIÇÃO SILVA"
+    assert res1["local_votacao"] == "PARÓQUIA DE SANTO ANTONIO ÁGUA FRIA/ARRUDA"
+    assert "RUA CORONEL SEVERINO" in res1["endereco_local_votacao"]
+
+    # Caso 2: Nome após Sr(a) com vírgula e inscrição eleitoral
+    text_carlos = """
+    TRIBUNAL REGIONAL ELEITORAL
+    CONVOCAÇÃO ELEITORAL
+    O Juiz Eleitoral convoca o(a) Sr(a). CARLOS EDUARDO DE ALBUQUERQUE JÚNIOR, inscrição eleitoral nº 123456789, para atuar como PRESIDENTE DE MESA...
+    """
+    res2 = extractor.extract(text_carlos, [text_carlos], {})
+    assert res2["nome_convocado"] == "CARLOS EDUARDO DE ALBUQUERQUE JÚNIOR"
+
+    # Caso 3: Nome após "Eleitor(a)"
+    text_ana = """
+    TRIBUNAL REGIONAL ELEITORAL
+    CARTA CONVOCATÓRIA
+    convoca o(a) eleitor(a) ANA PAULA DOS SANTOS FERREIRA para prestar serviços eleitorais...
+    """
+    res3 = extractor.extract(text_ana, [text_ana], {})
+    assert res3["nome_convocado"] == "ANA PAULA DOS SANTOS FERREIRA"
+
 def test_generic_document_extractor():
     """Testa extração de datas e dados gerais em outros PDFs."""
     text = "Relatório Financeiro emitido em 15/03/2026 para contato@empresa.com com valor de R$ 1.500,00."

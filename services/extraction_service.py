@@ -32,7 +32,43 @@ def _clean_text(val: str | None) -> str:
     """Remove quebras de linha excessivas e normaliza múltiplos espaços em branco."""
     if not val:
         return ""
-    return re.sub(r"\s+", " ", val).strip()
+    # Substitui quebras de linha e múltiplos espaços por um espaço simples
+    cleaned = re.sub(r"[\r\n\t]+", " ", str(val))
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
+def _extract_convocado_name(text: str) -> str:
+    """
+    Extrai com precisão o nome COMPLETO do convocado em documentos eleitorais,
+    suportando quebras de linhas no PDF, preposições (da, de, dos), acentuação e diferentes variações.
+    """
+    # 1. Tenta padrão com 'convoca o(a) Sr(a)...' ou variações com terminadores semânticos claros
+    patterns = [
+        # Padrão A: 'convoca o(a) Sr(a). NOME COMPLETO para atuar/trabalhar/exercer...'
+        r"convoca(?:ndo)?\s+(?:o\(a\)|o|a)?\s*(?:Sr\(a\)\.?|Senhor\(a\)\.?|Eleitor\(a\)\.?|Cidadão\(ã\)\.?|Sr\.|Sra\.)?\s*([A-ZÁÉÍÓÚÂÊÔÃÕÇÀÈÌÒÙÄËÏÖÜa-záéíóúâêôãõçàèìòùäëïöü\s\.\-']+?)(?=\s*,?\s*(?:para\s+atuar|para\s+trabalhar|para\s+exercer|para\s+prestar|para\s+compor|para\s+integrar|para\s+a\s+função|nas\s+ELEIÇÕES|como\s+[A-Z]|inscrição|inscrit[oa]|título|portador|cpf|rg|\bSEI\b|\bTRE\b|\bEleitoral\b|\.\s+Para|\.\s+O\(a\)|,\s*no\s+Local))",
+        
+        # Padrão B: 'Sr(a). NOME COMPLETO, ... para atuar...'
+        r"(?:Sr\(a\)\.?|Senhor\(a\)\.?|Eleitor\(a\)\.?)\s+([A-ZÁÉÍÓÚÂÊÔÃÕÇÀÈÌÒÙÄËÏÖÜ][A-ZÁÉÍÓÚÂÊÔÃÕÇÀÈÌÒÙÄËÏÖÜa-záéíóúâêôãõçàèìòùäëïöü\s\.\-']{3,100}?)(?=\s*,?\s*(?:para\s+atuar|para\s+trabalhar|para\s+exercer|nas\s+ELEIÇÕES|como\s+|inscrição|inscrit|título|portador|\.|\n\n))",
+        
+        # Padrão C: 'Nome / Convocado(a): NOME COMPLETO'
+        r"(?:Nome\s+(?:do\s+convocado|do\s+eleitor)?|Convocado\(a\)|Eleitor\(a\))\s*:\s*([A-ZÁÉÍÓÚÂÊÔÃÕÇÀÈÌÒÙÄËÏÖÜa-záéíóúâêôãõçàèìòùäëïöü\s\.\-']+?)(?=\n|$|,|Título|Inscrição|Zona|Local)",
+        
+        # Padrão D: Fallback genérico capturando texto em maiúsculas após convocação
+        r"convoca\s+o\(a\)\s+Sr\(a\)\.?\s*([A-ZÁÉÍÓÚÂÊÔÃÕÇ\s]{4,100})"
+    ]
+
+    for pat in patterns:
+        match = re.search(pat, text, re.IGNORECASE)
+        if match:
+            candidate = _clean_text(match.group(1))
+            # Remove pontuações residuais no final
+            candidate = re.sub(r"[,\.\-:]+$", "", candidate).strip()
+            # Ignora se for muito curto ou palavras-chave de cabeçalho
+            if len(candidate) >= 3 and not candidate.upper().startswith("TRIBUNAL"):
+                return candidate
+
+    return "Nome não detectado"
 
 
 class ElectionSummonsExtractor(BaseExtractor):
@@ -54,19 +90,8 @@ class ElectionSummonsExtractor(BaseExtractor):
         zona_match = re.search(r"(\d+ª\s+Zona(?:\s+Eleitoral)?)", text, re.IGNORECASE)
         data["zona_eleitoral"] = _clean_text(zona_match.group(1)) if zona_match else "Não identificada"
 
-        # 3. Nome do Convocado
-        # Padrão: "convoca o(a) Sr(a). NOME para atuar..."
-        convocado_match = re.search(
-            r"convoca\s+o\(a\)\s+Sr\(a\)\.?\s*\n*([A-ZÁÉÍÓÚÂÊÔÃÕÇ\s]{4,80}?)(?=\s+para\s+atuar|\s+para\s+trabalhar|\s*,|\s*\n\s*[A-Z])",
-            text,
-            re.IGNORECASE
-        )
-        if convocado_match:
-            data["nome_convocado"] = _clean_text(convocado_match.group(1))
-        else:
-            # Fallback para capturar nome em maiúsculas após "Sr(a)"
-            alt_match = re.search(r"Sr\(a\)\.?\s+([A-ZÁÉÍÓÚÂÊÔÃÕÇ\s]{5,70})", text)
-            data["nome_convocado"] = _clean_text(alt_match.group(1)) if alt_match else "Nome não detectado"
+        # 3. Nome Completo do Convocado
+        data["nome_convocado"] = _extract_convocado_name(text)
 
         # 4. Eleição / Pleito
         eleicoes_match = re.search(r"(ELEIÇÕES\s+[A-Z0-9\s]+?\d{4})", text, re.IGNORECASE)
@@ -82,15 +107,19 @@ class ElectionSummonsExtractor(BaseExtractor):
 
         # 6. Local de Votação
         local_match = re.search(
-            r"no\s+Local\s+de\s+Votação\s+([^,]+?)(?:,\s*situado|,\s*no\s+endereço|\.)",
+            r"no\s+Local\s+(?:de\s+Votação)?\s*[:\s]\s*([^,\n]+(?:\s+[^,\n]+)*?)(?:,\s*situad[oa]|,\s*localizad[oa]|,\s*no\s+endereço|,\s*endereço|\.\s*onde|\s*,\s*onde|\.|$)",
             text,
             re.IGNORECASE
         )
-        data["local_votacao"] = _clean_text(local_match.group(1)) if local_match else "Não especificado"
+        if local_match:
+            data["local_votacao"] = _clean_text(local_match.group(1))
+        else:
+            alt_local = re.search(r"no\s+Local\s+de\s+Votação\s+([^,]+?)(?:,\s*situado|,\s*no\s+endereço|\.)", text, re.IGNORECASE)
+            data["local_votacao"] = _clean_text(alt_local.group(1)) if alt_local else "Não especificado"
 
         # 7. Endereço do Local de Votação
         endereco_match = re.search(
-            r"situado\s+na?\s+([^,\n]+(?:,\s*[^,\n]+)*?)(?=\s*,\s*onde\s+deverá|\s*\n\s*comparecer|\.\s*onde)",
+            r"(?:situad[oa]\s+na?|localizad[oa]\s+na?|no\s+endereço\s+|endereço\s*[:\s]\s*)([^,\n]+(?:,\s*[^,\n]+)*?)(?=\s*,\s*onde\s+deverá|\s*\n\s*comparecer|\.\s*onde|\.\s*Para|\.|$)",
             text,
             re.IGNORECASE
         )
