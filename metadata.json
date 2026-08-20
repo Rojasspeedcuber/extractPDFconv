@@ -1,0 +1,6 @@
+{
+  "name": "PDF Extractor Python",
+  "description": "Aplicação 100% Python com Streamlit para upload, validação, processamento e extração de informações de arquivos PDF.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

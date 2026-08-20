@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  pdf-extractor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pdf_extractor_app
+    ports:
+      - "8501:8501"
+    environment:
+      - PORT=8501
+      - MAX_FILE_SIZE_MB=20
+      - USE_MOCK_EXTRACTION=false
+    volumes:
+      - ./storage/temp:/app/storage/temp
+    restart: unless-stopped
