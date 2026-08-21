@@ -38,6 +38,24 @@ def render_extraction_results(result: ExtractionResult):
 
     # 1. Cabeçalho de Destaque
     data = result.data or {}
+
+    # 0. Status da gravação no banco de dados (se a integração estiver ativa)
+    persistencia = data.get("_persistencia_banco")
+    if isinstance(persistencia, dict):
+        if persistencia.get("sucesso"):
+            n_instr = len(persistencia.get("instrumentos_inseridos", []))
+            n_conv = len(persistencia.get("conv_inseridos", []))
+            n_ign = len(persistencia.get("ignorados", []))
+            if n_instr or n_conv:
+                st.info(
+                    f"🗄️ Dados gravados no banco: **{n_instr}** instrumento(s) de "
+                    f"convocação e **{n_conv}** registro(s) de comparecimento."
+                    + (f" ({n_ign} já existiam e foram ignorados.)" if n_ign else "")
+                )
+            elif n_ign:
+                st.info("🗄️ Registros já existiam no banco de dados (nenhuma duplicata inserida).")
+        elif persistencia.get("erro"):
+            st.warning(f"🗄️ Não foi possível gravar no banco: {persistencia['erro']}")
     is_convocacao = "nome_convocado" in data or "datas_identificadas" in data
 
     if is_convocacao and "nome_convocado" in data:
@@ -157,6 +175,7 @@ def render_extraction_results(result: ExtractionResult):
     campos_principais = {
         k: v for k, v in data.items()
         if k not in ("datas_identificadas", "todas_as_datas_encontradas")
+        and not k.startswith("_")
     }
 
     if campos_principais:
