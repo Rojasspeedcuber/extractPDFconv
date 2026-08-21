@@ -9,6 +9,7 @@ Aplicação web desenvolvida **100% em Python** com **Streamlit** para upload, v
 - **Linguagem:** Python 3.12+ (compatível com 3.10+)
 - **Interface Web:** Streamlit
 - **Motor de Extração de PDF:** pypdf
+- **Banco de Dados:** PostgreSQL (via `psycopg2-binary`)
 - **Gestão de Ambiente:** python-dotenv
 - **Testes Automatizados:** pytest
 - **Containerização:** Docker & Docker Compose
@@ -40,6 +41,12 @@ O projeto segue estrita separação de responsabilidades em camadas desacopladas
 │   ├── __init__.py
 │   ├── document.py             # Informações e metadados do documento
 │   └── extraction.py           # Contrato de resultado da extração
+├── database/                   # Integração com o banco de dados PostgreSQL
+│   ├── __init__.py
+│   ├── schema.sql              # DDL das tabelas (instrumento_convocacao e conv)
+│   ├── db.py                   # Conexão, inserções e verificação de duplicatas
+│   └── persistence_service.py  # Mapeia os dados extraídos para as tabelas
+├── ingest_pdfs.py              # CLI para extrair PDFs e gravar no banco (lote)
 ├── utils/                      # Funções utilitárias
 │   ├── __init__.py
 │   └── file_validation.py      # Validação de formato, MIME, tamanho e integridade
@@ -83,11 +90,21 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-### 3. Configurar variáveis de ambiente (opcional)
+### 3. Configurar variáveis de ambiente
 
 ```bash
 cp .env.example .env
 ```
+
+Edite o arquivo `.env` e informe, principalmente, a URL de conexão do banco:
+
+```dotenv
+DATABASE_URL=postgresql://usuario:senha@host:5432/nome_do_banco
+PERSIST_TO_DB=true
+```
+
+> Se `DATABASE_URL` não for definida, a aplicação continua funcionando normalmente,
+> apenas **sem** gravar os dados no banco (`PERSIST_TO_DB` fica desativado por padrão).
 
 ### 4. Executar a aplicação
 
@@ -96,6 +113,77 @@ streamlit run app.py
 ```
 
 Acesse no navegador: `http://localhost:8501` (ou `http://localhost:3000` conforme a configuração da variável `PORT`).
+
+---
+
+## 🗄️ Integração com Banco de Dados PostgreSQL
+
+A aplicação grava automaticamente os dados extraídos das cartas convocatórias em um
+banco **PostgreSQL** já existente, em duas tabelas:
+
+### Tabelas
+
+**`instrumento_convocacao`** — registro de cada instrumento/carta de convocação:
+
+| Coluna             | Tipo         | Descrição                                            |
+|--------------------|--------------|------------------------------------------------------|
+| `id`               | SERIAL (PK)  | Identificador autoincremental                        |
+| `tipo`             | INTEGER      | `0` = treinamento (28/08), `1` = 1º turno, `2` = 2º turno |
+| `data`             | DATE         | Data associada ao tipo de convocação                 |
+| `responsavel`      | TEXT         | Responsável/assinante do instrumento                 |
+| `convocado_cpf`    | VARCHAR(11)  | CPF do convocado (apenas dígitos)                    |
+| `orgao_convocador` | TEXT         | Órgão que emitiu a convocação                        |
+
+**`conv`** — controle de comparecimento por convocação:
+
+| Coluna      | Tipo         | Descrição                                            |
+|-------------|--------------|------------------------------------------------------|
+| `id`        | SERIAL (PK)  | Identificador autoincremental                        |
+| `cpf`       | VARCHAR(11)  | CPF da pessoa (apenas dígitos)                       |
+| `tipo`      | INTEGER      | `0` = treinamento, `1` = 1º turno, `2` = 2º turno    |
+| `data`      | DATE         | Data associada ao tipo                               |
+| `realizado` | BOOLEAN      | Se o comparecimento foi realizado (padrão `false`)   |
+
+### Criar as tabelas no banco
+
+Você pode criar/verificar as tabelas de duas formas:
+
+**Opção A — via CLI do projeto:**
+```bash
+python ingest_pdfs.py --init-db
+```
+
+**Opção B — diretamente com o `psql`:**
+```bash
+psql "$DATABASE_URL" -f database/schema.sql
+```
+
+O script usa `CREATE TABLE IF NOT EXISTS`, portanto é seguro executá-lo em um banco
+já existente sem apagar dados.
+
+### Como os dados são gravados
+
+- **Pela interface (Streamlit):** ao processar um PDF, os dados extraídos são
+  automaticamente gravados no banco (quando `PERSIST_TO_DB` está ativo). Um aviso
+  na tela confirma quantos registros foram inseridos.
+- **Por linha de comando (lote):** útil para processar vários PDFs de uma vez.
+
+```bash
+# Testar a conexão com o banco
+python ingest_pdfs.py --test-conn
+
+# Processar um único PDF
+python ingest_pdfs.py caminho/para/convocacao.pdf
+
+# Processar todos os PDFs de uma pasta
+python ingest_pdfs.py caminho/para/pasta_de_pdfs/
+```
+
+### Prevenção de duplicatas
+
+Antes de inserir, o sistema verifica se já existe registro para o mesmo **CPF + tipo**
+em cada tabela. Se já existir, a inserção é **ignorada** (não duplica), e isso é
+informado nos logs e no resumo de processamento.
 
 ---
 

@@ -26,6 +26,17 @@ class Settings:
     # Variáveis futuras para extensões (OCR / IA / Nuvem)
     GOOGLE_API_KEY: str | None = os.getenv("GOOGLE_API_KEY")
 
+    # --- Integração com banco de dados PostgreSQL ---
+    # URL de conexão do PostgreSQL (ex.: postgresql://user:senha@host:5432/banco)
+    DATABASE_URL: str | None = os.getenv("DATABASE_URL")
+
+    # Ativa a persistência automática dos dados extraídos no banco.
+    # Por padrão fica habilitada quando existe uma DATABASE_URL configurada.
+    PERSIST_TO_DB: bool = os.getenv(
+        "PERSIST_TO_DB",
+        "true" if os.getenv("DATABASE_URL") else "false",
+    ).lower() in ("true", "1", "yes")
+
 settings = Settings()
 
 # Garante que o diretório de armazenamento exista
