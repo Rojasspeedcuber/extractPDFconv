@@ -12,12 +12,20 @@ from config.settings import settings
 logger = logging.getLogger(__name__)
 
 
-def _persistir_no_banco(extraction_result: ExtractionResult) -> None:
+def _persistir_no_banco(
+    extraction_result: ExtractionResult,
+    cpf_usuario: str | None = None,
+) -> None:
     """Persiste os dados extraídos no PostgreSQL, se a integração estiver ativa.
 
     A persistência só ocorre quando:
       - settings.PERSIST_TO_DB está habilitado (DATABASE_URL configurada), e
       - a extração foi concluída com sucesso e possui dados.
+
+    Args:
+        extraction_result: resultado da extração.
+        cpf_usuario: CPF do usuário autenticado (usado como fallback quando o
+            PDF não contém um CPF detectável).
 
     Erros de banco são registrados em log e NÃO interrompem o fluxo do app.
     """
@@ -33,7 +41,7 @@ def _persistir_no_banco(extraction_result: ExtractionResult) -> None:
         # Importação tardia para não exigir psycopg2 quando a integração está desativada.
         from database.persistence_service import persistir_extracao
 
-        resumo = persistir_extracao(extraction_result.data)
+        resumo = persistir_extracao(extraction_result.data, cpf_usuario=cpf_usuario)
         if resumo.get("sucesso"):
             logger.info(
                 "Dados persistidos no banco: %s instrumento(s), %s registro(s) de comparecimento.",
@@ -62,7 +70,8 @@ class ProcessingService:
     def process_document(
         file_obj: BinaryIO | bytes | io.BytesIO,
         filename: str,
-        progress_callback: Callable[[str, float], None] | None = None
+        progress_callback: Callable[[str, float], None] | None = None,
+        cpf_usuario: str | None = None
     ) -> tuple[DocumentInfo, ExtractionResult]:
         """
         Executa o pipeline completo:
@@ -102,7 +111,7 @@ class ProcessingService:
 
             # 3.1. Persiste automaticamente os dados extraídos no PostgreSQL
             update_progress("Salvando dados no banco de dados...", 0.90)
-            _persistir_no_banco(extraction_result)
+            _persistir_no_banco(extraction_result, cpf_usuario=cpf_usuario)
 
             # 4. Finalização
             update_progress("Finalizando processamento...", 1.0)

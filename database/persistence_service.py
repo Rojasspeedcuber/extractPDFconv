@@ -101,22 +101,32 @@ def _extrair_datas_por_tipo(data: dict[str, Any]) -> dict[int, Optional[date]]:
     return resultado
 
 
-def persistir_extracao(data: dict[str, Any]) -> dict[str, Any]:
+def persistir_extracao(
+    data: dict[str, Any],
+    cpf_usuario: str | None = None,
+) -> dict[str, Any]:
     """Persiste os dados extraídos de um PDF nas tabelas do PostgreSQL.
 
     Para cada tipo de convocação identificado (treinamento, 1º turno, 2º turno),
     cria (quando aplicável) um registro em `instrumento_convocacao` e um registro
     de controle em `conv`.
 
+    Estratégia de definição do CPF:
+        1. Tenta extrair o CPF do próprio PDF (``_primeiro_cpf``).
+        2. Se não encontrar, usa ``cpf_usuario`` (CPF informado no login).
+        3. Se nenhum estiver disponível, retorna erro.
+
     Args:
         data: dicionário `ExtractionResult.data` gerado pela extração.
+        cpf_usuario: CPF do usuário autenticado, usado como fallback.
 
     Returns:
-        dict: resumo da operação com contadores e ids inseridos.
+        dict: resumo da operação com contadores, ids inseridos e a fonte do CPF.
     """
     resumo: dict[str, Any] = {
         "sucesso": False,
         "cpf": None,
+        "cpf_fonte": None,  # "pdf" | "usuario" | None
         "instrumentos_inseridos": [],
         "conv_inseridos": [],
         "ignorados": [],
@@ -128,14 +138,25 @@ def persistir_extracao(data: dict[str, Any]) -> dict[str, Any]:
         logger.warning(resumo["erro"])
         return resumo
 
+    # 1. Tenta o CPF extraído do PDF
     cpf_raw = _primeiro_cpf(data)
     cpf_norm = db.sanitize_cpf(cpf_raw) if cpf_raw else None
+    if cpf_norm:
+        resumo["cpf_fonte"] = "pdf"
+        logger.info("CPF extraído do PDF: %s", cpf_norm)
+    else:
+        # 2. Fallback: CPF fornecido pelo usuário na autenticação
+        cpf_norm = db.sanitize_cpf(cpf_usuario) if cpf_usuario else None
+        if cpf_norm:
+            resumo["cpf_fonte"] = "usuario"
+            logger.info("CPF fornecido pelo usuário na autenticação: %s", cpf_norm)
+
     resumo["cpf"] = cpf_norm
 
     if not cpf_norm:
         resumo["erro"] = (
-            "Nenhum CPF válido foi detectado no documento; não é possível "
-            "persistir os registros de convocação."
+            "Nenhum CPF válido foi detectado no documento nem informado no login; "
+            "não é possível persistir os registros de convocação."
         )
         logger.warning(resumo["erro"])
         return resumo

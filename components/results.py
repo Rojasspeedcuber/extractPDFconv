@@ -206,3 +206,128 @@ def render_extraction_results(result: ExtractionResult):
     # 6. Visualizador JSON Bruto
     with st.expander("🛠️ Ver Estrutura JSON Completa"):
         st.json(result.data)
+
+    # 7. Registros do usuário logado no banco de dados
+    render_registros_usuario()
+
+
+# Rótulos e cores por tipo de convocação
+_TIPO_LABELS = {0: "Treinamento", 1: "1º Turno", 2: "2º Turno"}
+_TIPO_CORES = {
+    0: ("#f0fdf4", "#bbf7d0", "#15803d"),  # verde (treinamento)
+    1: ("#eff6ff", "#bfdbfe", "#1d4ed8"),  # azul (1º turno)
+    2: ("#f8fafc", "#e2e8f0", "#475569"),  # cinza (2º turno)
+}
+
+
+def _badge_tipo(tipo: Any) -> str:
+    """Retorna um badge HTML colorido para o tipo de convocação."""
+    try:
+        tipo_int = int(tipo)
+    except (TypeError, ValueError):
+        tipo_int = -1
+    label = _TIPO_LABELS.get(tipo_int, f"Tipo {tipo}")
+    bg, borda, cor = _TIPO_CORES.get(tipo_int, ("#f1f5f9", "#e2e8f0", "#334155"))
+    return (
+        f"<span style='background:{bg}; border:1px solid {borda}; color:{cor}; "
+        f"border-radius:6px; padding:2px 10px; font-size:0.82rem; font-weight:600;'>"
+        f"{label}</span>"
+    )
+
+
+def _fmt_data(valor: Any) -> str:
+    """Formata uma data (date/str) como DD/MM/AAAA, ou '—' se ausente."""
+    if not valor:
+        return "—"
+    try:
+        return valor.strftime("%d/%m/%Y")  # objeto date
+    except AttributeError:
+        return str(valor)
+
+
+def render_registros_usuario() -> None:
+    """Renderiza a seção "📋 Seus Registros no Banco" para o CPF logado."""
+    cpf = st.session_state.get("cpf_usuario")
+    cpf_fmt = st.session_state.get("cpf_usuario_fmt")
+    if not cpf:
+        return
+
+    st.divider()
+    st.markdown("### 📋 Seus Registros no Banco")
+
+    # Badge azul com o CPF formatado
+    st.markdown(
+        f"<div style='display:inline-block; background:#1e3a8a; color:white; "
+        f"border-radius:8px; padding:6px 14px; font-weight:600; margin-bottom:10px;'>"
+        f"👤 CPF: {cpf_fmt or cpf}</div>",
+        unsafe_allow_html=True,
+    )
+
+    try:
+        from database.db import buscar_registros_cpf
+        registros = buscar_registros_cpf(cpf)
+    except ImportError:
+        st.warning("🗄️ Integração com o banco indisponível (psycopg2 não instalado).")
+        return
+    except Exception as exc:  # noqa: BLE001 - não deve quebrar a interface
+        st.warning(f"🗄️ Não foi possível consultar o banco: {exc}")
+        return
+
+    instrumentos = registros.get("instrumentos", [])
+    conv = registros.get("conv", [])
+
+    if not instrumentos and not conv:
+        st.info("Nenhum registro encontrado para este CPF.")
+        return
+
+    # Mapeia comparecimento (conv) por tipo para cruzar com instrumentos
+    conv_por_tipo = {c.get("tipo"): c for c in conv}
+
+    st.markdown("#### 🗂️ Instrumentos de Convocação")
+    if instrumentos:
+        for inst in instrumentos:
+            tipo = inst.get("tipo")
+            conv_rel = conv_por_tipo.get(tipo, {})
+            realizado = conv_rel.get("realizado")
+            realizado_txt = "✅ Realizado" if realizado else "❌ Não realizado"
+            st.markdown(
+                f"""
+                <div style="border:1px solid #e2e8f0; border-radius:10px; padding:12px 16px;
+                            margin-bottom:10px; box-shadow:0 1px 2px rgba(0,0,0,0.04);">
+                    <div style="display:flex; justify-content:space-between; align-items:center;
+                                flex-wrap:wrap; gap:8px;">
+                        <div>{_badge_tipo(tipo)}
+                            <span style="margin-left:10px; color:#0f172a; font-weight:600;">
+                                📅 {_fmt_data(inst.get('data'))}
+                            </span>
+                        </div>
+                        <div style="font-size:0.9rem; font-weight:600;
+                                    color:{'#15803d' if realizado else '#b91c1c'};">
+                            {realizado_txt}
+                        </div>
+                    </div>
+                    <div style="margin-top:6px; font-size:0.88rem; color:#334155;">
+                        <strong>Órgão convocador:</strong> {inst.get('orgao_convocador') or '—'}
+                    </div>
+                    <div style="font-size:0.85rem; color:#64748b;">
+                        <strong>Responsável:</strong> {inst.get('responsavel') or '—'}
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+    else:
+        st.caption("Nenhum instrumento de convocação registrado.")
+
+    st.markdown("#### 📝 Controle de Comparecimento")
+    if conv:
+        for c in conv:
+            realizado = c.get("realizado")
+            st.markdown(
+                f"{_badge_tipo(c.get('tipo'))} &nbsp; "
+                f"📅 **{_fmt_data(c.get('data'))}** &nbsp; "
+                f"{'✅ Realizado' if realizado else '❌ Não realizado'}",
+                unsafe_allow_html=True,
+            )
+    else:
+        st.caption("Nenhum registro de comparecimento.")

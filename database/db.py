@@ -234,6 +234,48 @@ def insert_instrumento_convocacao(
     return novo_id
 
 
+def buscar_registros_cpf(cpf: str) -> dict:
+    """Retorna instrumentos e registros conv para o CPF informado.
+
+    Args:
+        cpf: CPF (com ou sem formatação).
+
+    Returns:
+        dict: {"instrumentos": [...], "conv": [...]} com uma lista de dicts por linha.
+    """
+    cpf_limpo = sanitize_cpf(cpf)
+    if not cpf_limpo:
+        return {"instrumentos": [], "conv": []}
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, tipo, data, responsavel, orgao_convocador, criado_em "
+                "FROM instrumento_convocacao WHERE convocado_cpf = %s ORDER BY tipo",
+                (cpf_limpo,),
+            )
+            instrumentos = cur.fetchall()
+            cur.execute(
+                "SELECT id, cpf, tipo, data, realizado, criado_em "
+                "FROM conv WHERE cpf = %s ORDER BY tipo",
+                (cpf_limpo,),
+            )
+            conv = cur.fetchall()
+
+    return {
+        "instrumentos": [
+            dict(zip(
+                ["id", "tipo", "data", "responsavel", "orgao_convocador", "criado_em"], r
+            ))
+            for r in instrumentos
+        ],
+        "conv": [
+            dict(zip(["id", "cpf", "tipo", "data", "realizado", "criado_em"], r))
+            for r in conv
+        ],
+    }
+
+
 def insert_conv(
     cpf: Optional[str],
     tipo: int,
