@@ -7,6 +7,7 @@ from services.pdf_service import PDFService
 from components.upload import render_upload_section, render_document_preview
 from components.processing import render_processing_indicator
 from components.results import render_extraction_results
+from components.auth import render_login_page
 from mocks.extraction_mock import get_mock_extraction_result
 
 # Configuração de Logging centralizado
@@ -40,11 +41,31 @@ if "is_processing" not in st.session_state:
 if "mock_mode" not in st.session_state:
     st.session_state.mock_mode = settings.USE_MOCK_EXTRACTION
 
+if "autenticado" not in st.session_state:
+    st.session_state.autenticado = False
+
+if "cpf_usuario" not in st.session_state:
+    st.session_state.cpf_usuario = None
+
+# --- GATE DE AUTENTICAÇÃO ---
+# Bloqueia todo o conteúdo principal enquanto o usuário não estiver autenticado.
+if not render_login_page():
+    st.stop()
+
 # --- BARRA LATERAL (CONFIGURAÇÕES E CONTROLES) ---
 with st.sidebar:
     st.title("⚙️ Painel de Controle")
     st.caption("Configurações do ambiente de extração")
-    
+
+    # Bloco do usuário autenticado
+    st.markdown("---")
+    st.markdown(f"👤 **Usuário:** {st.session_state.get('cpf_usuario_fmt', '—')}")
+    if st.button("🚪 Sair", use_container_width=True):
+        st.session_state.autenticado = False
+        st.session_state.cpf_usuario = None
+        st.session_state.cpf_usuario_fmt = None
+        st.rerun()
+
     st.markdown("---")
     mock_toggle = st.toggle(
         "Ativar Modo Mock",
@@ -138,7 +159,8 @@ else:
                     doc_info, extraction_res = ProcessingService.process_document(
                         file_bytes,
                         uploaded_file.name,
-                        progress_callback=update_ui
+                        progress_callback=update_ui,
+                        cpf_usuario=st.session_state.get("cpf_usuario")
                     )
                     st.session_state.doc_info = doc_info
                     st.session_state.extraction_result = extraction_res

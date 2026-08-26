@@ -93,3 +93,36 @@ def test_persistir_extracao_sem_cpf():
     resumo = ps.persistir_extracao({"orgao_emissor": "TRE-SP"})
     assert resumo["sucesso"] is False
     assert "CPF" in (resumo["erro"] or "")
+    assert resumo["cpf_fonte"] is None
+
+
+def test_persistir_extracao_cpf_do_pdf_tem_prioridade(monkeypatch):
+    monkeypatch.setattr(db, "insert_instrumento_convocacao", lambda **k: 1)
+    monkeypatch.setattr(db, "insert_conv", lambda **k: 1)
+    data = {"cpfs_detectados": ["111.444.777-35"], "orgao_emissor": "TRE-PE"}
+    resumo = ps.persistir_extracao(data, cpf_usuario="529.982.247-25")
+    assert resumo["sucesso"] is True
+    assert resumo["cpf"] == "11144477735"
+    assert resumo["cpf_fonte"] == "pdf"
+
+
+def test_persistir_extracao_fallback_cpf_usuario(monkeypatch):
+    chamadas = []
+    monkeypatch.setattr(db, "insert_instrumento_convocacao", lambda **k: chamadas.append(k) or 1)
+    monkeypatch.setattr(db, "insert_conv", lambda **k: 1)
+    # PDF sem CPF -> deve usar o CPF do usuário logado
+    data = {"orgao_emissor": "TRE-PE", "nome_convocado": "Fulano"}
+    resumo = ps.persistir_extracao(data, cpf_usuario="529.982.247-25")
+    assert resumo["sucesso"] is True
+    assert resumo["cpf"] == "52998224725"
+    assert resumo["cpf_fonte"] == "usuario"
+    assert chamadas and chamadas[0]["convocado_cpf"] == "52998224725"
+
+
+def test_auth_cpf_valido():
+    from components import auth
+    assert auth._cpf_valido("111.444.777-35") == "11144477735"
+    assert auth._cpf_valido("111.111.111-11") is None  # dígitos repetidos
+    assert auth._cpf_valido("123") is None
+    assert auth._cpf_valido(None) is None
+    assert auth._formatar_cpf("11144477735") == "111.444.777-35"

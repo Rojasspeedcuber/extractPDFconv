@@ -37,6 +37,13 @@ class Settings:
         "true" if os.getenv("DATABASE_URL") else "false",
     ).lower() in ("true", "1", "yes")
 
+    # --- Keycloak (autenticação) ---
+    # Quando KEYCLOAK_URL estiver vazio, o sistema usa o modo "CPF direto"
+    # (desenvolvimento), aceitando qualquer CPF válido como login.
+    KEYCLOAK_URL: str = os.getenv("KEYCLOAK_URL", "")
+    KEYCLOAK_REALM: str = os.getenv("KEYCLOAK_REALM", "")
+    KEYCLOAK_CLIENT_ID: str = os.getenv("KEYCLOAK_CLIENT_ID", "")
+
 settings = Settings()
 
 # Garante que o diretório de armazenamento exista
