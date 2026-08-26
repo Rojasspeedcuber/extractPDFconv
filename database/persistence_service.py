@@ -73,24 +73,30 @@ def _extrair_datas_por_tipo(data: dict[str, Any]) -> dict[int, Optional[date]]:
     """
     datas_info = data.get("datas_identificadas") or {}
     resultado: dict[int, Optional[date]] = {}
+    data_treino: Optional[date] = None
 
     if isinstance(datas_info, dict):
         # Treinamento (tipo 0)
         treino = datas_info.get("treinamento") or {}
         if isinstance(treino, dict):
-            resultado[TIPO_TREINAMENTO] = _parse_data_br(treino.get("data"))
+            data_treino = _parse_data_br(treino.get("data"))
+            resultado[TIPO_TREINAMENTO] = data_treino
 
-        # 1º Turno (tipo 1)
+        # 1º Turno (tipo 1) — evita reutilizar a data do treinamento quando a
+        # lista de datas do turno vier "poluída" com a data do treinamento.
         p_turno = datas_info.get("primeiro_turno") or {}
         if isinstance(p_turno, dict):
-            datas_1t = p_turno.get("datas") or []
-            resultado[TIPO_PRIMEIRO_TURNO] = _parse_data_br(datas_1t[0]) if datas_1t else None
+            datas_1t = [_parse_data_br(d) for d in (p_turno.get("datas") or [])]
+            datas_1t = [d for d in datas_1t if d is not None]
+            candidatas = [d for d in datas_1t if d != data_treino] or datas_1t
+            resultado[TIPO_PRIMEIRO_TURNO] = candidatas[0] if candidatas else None
 
         # 2º Turno (tipo 2)
         s_turno = datas_info.get("segundo_turno") or {}
         if isinstance(s_turno, dict):
-            datas_2t = s_turno.get("datas") or []
-            resultado[TIPO_SEGUNDO_TURNO] = _parse_data_br(datas_2t[0]) if datas_2t else None
+            datas_2t = [_parse_data_br(d) for d in (s_turno.get("datas") or [])]
+            datas_2t = [d for d in datas_2t if d is not None and d != data_treino]
+            resultado[TIPO_SEGUNDO_TURNO] = datas_2t[0] if datas_2t else None
 
     return resultado
 

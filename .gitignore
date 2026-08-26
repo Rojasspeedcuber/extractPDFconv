@@ -7,3 +7,4 @@ coverage/
 .env*
 !.env.example
 .abacus.donotdelete
+.pytest_cache/

@@ -71,6 +71,66 @@ def _extract_convocado_name(text: str) -> str:
     return "Nome não detectado"
 
 
+def _extract_cpfs(text: str) -> list[str]:
+    """Extrai CPFs de um texto, aceitando formatos com e sem máscara.
+
+    Estratégia:
+        1. Captura CPFs com máscara completa (123.456.789-00).
+        2. Captura CPFs precedidos de rótulo "CPF"/"C.P.F" mesmo sem máscara.
+        3. Valida cada candidato pelos dígitos verificadores (algoritmo oficial),
+           evitando capturar números de processo/protocolo por engano.
+
+    Retorna a lista de CPFs formatados (000.000.000-00), sem duplicatas,
+    preservando a ordem de ocorrência.
+    """
+    # Cada candidato é (digitos, exige_validacao).
+    # CPFs em formato explícito (com máscara ou rotulados "CPF:") são aceitos
+    # diretamente; sequências de 11 dígitos soltas exigem validação por dígito
+    # verificador para não capturar números de protocolo/processo.
+    candidatos: list[tuple[str, bool]] = []
+
+    # 1. CPF com máscara: 123.456.789-00
+    for m in re.findall(r"\d{3}\.\d{3}\.\d{3}-\d{2}", text):
+        candidatos.append((re.sub(r"\D", "", m), False))
+
+    # 2. CPF rotulado, com ou sem máscara: "CPF: 12345678900" / "CPF nº 123.456.789-00"
+    for m in re.findall(
+        r"C\.?\s*P\.?\s*F\.?\s*(?:n[ºo\.]*)?\s*[:\-]?\s*(\d{3}\.?\d{3}\.?\d{3}-?\d{2})",
+        text,
+        re.IGNORECASE,
+    ):
+        candidatos.append((re.sub(r"\D", "", m), False))
+
+    # 3. Fallback: qualquer sequência de 11 dígitos isolada (com fronteiras)
+    for m in re.findall(r"(?<!\d)(\d{11})(?!\d)", text):
+        candidatos.append((m, True))
+
+    # Deduplica preservando ordem de ocorrência
+    vistos: set[str] = set()
+    validos: list[str] = []
+    for cpf, exige_validacao in candidatos:
+        if len(cpf) != 11 or cpf in vistos:
+            continue
+        vistos.add(cpf)
+        if exige_validacao and not _cpf_digitos_validos(cpf):
+            continue
+        validos.append(f"{cpf[:3]}.{cpf[3:6]}.{cpf[6:9]}-{cpf[9:]}")
+
+    return validos
+
+
+def _cpf_digitos_validos(cpf: str) -> bool:
+    """Valida um CPF (11 dígitos) pelos dígitos verificadores oficiais."""
+    if len(cpf) != 11 or cpf == cpf[0] * 11:
+        return False
+    for i in range(9, 11):
+        soma = sum(int(cpf[num]) * ((i + 1) - num) for num in range(0, i))
+        digito = ((soma * 10) % 11) % 10
+        if digito != int(cpf[i]):
+            return False
+    return True
+
+
 class ElectionSummonsExtractor(BaseExtractor):
     """Extrator especializado para Cartas Convocatórias da Justiça Eleitoral."""
 
@@ -92,6 +152,23 @@ class ElectionSummonsExtractor(BaseExtractor):
 
         # 3. Nome Completo do Convocado
         data["nome_convocado"] = _extract_convocado_name(text)
+
+        # 3.1 CPF(s) do convocado — essencial para a persistência no banco.
+        # Aceita CPF com máscara (123.456.789-00), sem máscara (12345678900)
+        # e também quando precedido de rótulos como "CPF:" ou "C.P.F".
+        data["cpfs_detectados"] = _extract_cpfs(text)
+        if data["cpfs_detectados"]:
+            data["cpf_convocado"] = data["cpfs_detectados"][0]
+
+        # 3.2 Responsável pela convocação (assinante do instrumento)
+        resp_match = re.search(
+            r"Respons[aá]vel\s*[:\-]?\s*([^\n]+?)(?=\n|$|,\s*(?:CPF|Orgao|Órgão))",
+            text,
+            re.IGNORECASE,
+        )
+        if resp_match:
+            # Remove pontuação/‘.’ residual ao final (ex.: "... Eleitoral.")
+            data["responsavel"] = re.sub(r"[\s\.\-,:]+$", "", _clean_text(resp_match.group(1)))
 
         # 4. Eleição / Pleito
         eleicoes_match = re.search(r"(ELEIÇÕES\s+[A-Z0-9\s]+?\d{4})", text, re.IGNORECASE)
