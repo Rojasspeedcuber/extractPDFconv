@@ -4,7 +4,13 @@ import pytest
 from pypdf import PdfWriter
 from config.settings import settings
 from mocks.extraction_mock import get_mock_extraction_result
-from services.extraction_service import ExtractionService, ElectionSummonsExtractor, GenericDocumentExtractor
+from services.extraction_service import (
+    ExtractionService,
+    ElectionSummonsExtractor,
+    GenericDocumentExtractor,
+    _extract_cpfs,
+    _cpf_digitos_validos,
+)
 from models.extraction import ExtractionResult
 
 def test_mock_extraction():
@@ -110,3 +116,46 @@ def test_generic_document_extractor():
     data = extractor.extract(text, [text], {})
     assert "15/03/2026" in data["datas_identificadas"]
     assert "contato@empresa.com" in data["emails_detectados"]
+
+
+
+def test_extract_cpfs_com_mascara():
+    """CPF com máscara deve ser detectado e normalizado no formato padrão."""
+    texto = "Convoca o(a) Sr(a). Maria Santos, CPF: 111.444.777-35, para atuar."
+    assert _extract_cpfs(texto) == ["111.444.777-35"]
+
+
+def test_extract_cpfs_sem_mascara_rotulado():
+    """CPF sem máscara, precedido de rótulo 'CPF', deve ser detectado."""
+    texto = "Nome: Joao. CPF 11144477735 Zona 123."
+    assert _extract_cpfs(texto) == ["111.444.777-35"]
+
+
+def test_extract_cpfs_ignora_numeros_invalidos():
+    """Sequências de 11 dígitos que não são CPF válido devem ser ignoradas."""
+    texto = "Protocolo 12345678901 e processo 00000000000 sem CPF."
+    assert _extract_cpfs(texto) == []
+
+
+def test_cpf_digitos_validos():
+    """Validação de dígitos verificadores do CPF."""
+    assert _cpf_digitos_validos("11144477735") is True
+    assert _cpf_digitos_validos("12345678900") is False
+    assert _cpf_digitos_validos("00000000000") is False
+
+
+def test_election_extractor_detecta_cpf_e_responsavel():
+    """Carta convocatória deve popular cpfs_detectados e responsavel."""
+    texto = (
+        "TRIBUNAL REGIONAL ELEITORAL DE PERNAMBUCO\n"
+        "CARTA CONVOCATORIA\n"
+        "A Justica Eleitoral convoca o(a) Sr(a). Maria Santos da Silva,\n"
+        "CPF: 111.444.777-35, para atuar nas ELEICOES 2026 como Mesaria.\n"
+        "Responsavel: Dr. Joao Silva - Juiz Eleitoral.\n"
+    )
+    extractor = ElectionSummonsExtractor()
+    assert extractor.can_handle(texto, {}) is True
+    data = extractor.extract(texto, [texto], {})
+    assert data["cpfs_detectados"] == ["111.444.777-35"]
+    assert data["cpf_convocado"] == "111.444.777-35"
+    assert data["responsavel"] == "Dr. Joao Silva - Juiz Eleitoral"
