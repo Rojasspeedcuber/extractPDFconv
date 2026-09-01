@@ -1,6 +1,7 @@
 """Serviço orquestrador do fluxo completo de upload, validação e extração."""
 import logging
 import io
+import re
 from pathlib import Path
 from typing import BinaryIO, Callable
 from models.document import DocumentInfo
@@ -10,6 +11,47 @@ from services.extraction_service import extract_information
 from config.settings import settings
 
 logger = logging.getLogger(__name__)
+
+
+def _incluir_cpf_do_usuario(
+    extraction_result: ExtractionResult,
+    cpf_usuario: str | None,
+) -> None:
+    """Garante que o CPF informado no login apareça em ``cpfs_detectados``.
+
+    Se o documento não contém nenhum CPF (ou contém apenas outros), o CPF do
+    usuário autenticado é acrescentado à lista de CPFs detectados, para que
+    figure nos resultados exibidos e na persistência. CPFs já presentes na
+    lista não são duplicados, e CPFs extraídos do PDF mantêm a precedência.
+
+    Args:
+        extraction_result: resultado da extração (mutado in-place).
+        cpf_usuario: CPF informado na entrada/login (qualquer formato).
+    """
+    if extraction_result.status != "completed" or not isinstance(extraction_result.data, dict):
+        return
+
+    digitos = re.sub(r"\D", "", str(cpf_usuario or ""))
+    if len(digitos) != 11:
+        logger.warning("CPF do usuário ignorado por não conter 11 dígitos: %r", cpf_usuario)
+        return
+
+    cpf_fmt = f"{digitos[:3]}.{digitos[3:6]}.{digitos[6:9]}-{digitos[9:]}"
+    data = extraction_result.data
+
+    cpfs = data.get("cpfs_detectados")
+    if not isinstance(cpfs, list):
+        cpfs = []
+
+    if cpf_fmt in cpfs:
+        return
+
+    cpfs.append(cpf_fmt)
+    data["cpfs_detectados"] = cpfs
+    if not data.get("cpf_convocado"):
+        data["cpf_convocado"] = cpf_fmt
+    extraction_result.extracted_fields_count = len(data)
+    logger.info("CPF do usuário %s incluído nos CPFs detectados.", cpf_fmt)
 
 
 def _persistir_no_banco(
@@ -108,6 +150,9 @@ class ProcessingService:
             # 3. Extrai informações
             update_progress("Extraindo dados e campos do PDF...", 0.75)
             extraction_result = extract_information(temp_path)
+
+            # 3.0. Inclui o CPF informado no login entre os CPFs detectados
+            _incluir_cpf_do_usuario(extraction_result, cpf_usuario)
 
             # 3.1. Persiste automaticamente os dados extraídos no PostgreSQL
             update_progress("Salvando dados no banco de dados...", 0.90)
