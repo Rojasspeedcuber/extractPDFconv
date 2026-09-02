@@ -1,6 +1,6 @@
 # 📄 PDF Extractor (100% Python + Streamlit)
 
-Aplicação web desenvolvida **100% em Python** com **Streamlit** para upload, validação estrutural, inspeção de metadados e extração de informações de documentos PDF (com suporte a Cartas Convocatórias, documentos eleitorais e documentos gerais com extração cronológica de datas).
+Aplicação web desenvolvida **100% em Python** com **Streamlit** para upload, validação estrutural, inspeção de metadados e extração de informações de documentos PDF (com suporte a Cartas Convocatórias, documentos eleitorais e documentos gerais com extração cronológica de datas). Inclui ainda **comprovação de participação nas eleições** com verificação de autenticidade e **cálculo automático dos dias ganhos**.
 
 ---
 
@@ -184,6 +184,34 @@ python ingest_pdfs.py caminho/para/pasta_de_pdfs/
 Antes de inserir, o sistema verifica se já existe registro para o mesmo **CPF + tipo**
 em cada tabela. Se já existir, a inserção é **ignorada** (não duplica), e isso é
 informado nos logs e no resumo de processamento.
+
+---
+
+## 🗳️ Comprovação de Participação e Cálculo dos Dias Ganho
+
+A aba **"Participação nas Eleições"** permite que o eleitor envie os documentos
+(PDF) que comprovam sua participação em cada etapa das eleições. O fluxo é:
+
+1. **Upload** do documento comprobatório (Treinamento, 1º Turno ou 2º Turno).
+2. **Verificação de autenticidade:** o sistema confere a **assinatura**
+   (digital embutida no PDF ou eletrônica textual no padrão SEI — Lei 11.419/2006)
+   e o **código de autenticidade** (código verificador + código CRC).
+3. **Somente documentos válidos** são armazenados e seguem para o cálculo.
+   Documentos inválidos ou ausentes **não** contabilizam dias.
+
+### Regra de cálculo dos dias ganhos
+
+| Etapa         | Dias ganhos | Observação                          |
+|---------------|:-----------:|-------------------------------------|
+| Treinamento   | 1 dia       |                                     |
+| 1º Turno      | 4 dias      |                                     |
+| 2º Turno      | 4 dias      | soma multiplicada por 2 (2 dias x 2)|
+
+Total máximo possível: **9 dias** (1 + 4 + 4). Cada parcela só é somada quando o
+respectivo documento foi enviado e considerado válido.
+
+Os comprovantes válidos são gravados na tabela **`documento_comprovante`** e o
+comparecimento correspondente é marcado como **realizado** na tabela `conv`.
 
 ---
 

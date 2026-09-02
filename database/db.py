@@ -276,6 +276,160 @@ def buscar_registros_cpf(cpf: str) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# Documentos comprobatórios de participação (upload de PDFs)
+# ---------------------------------------------------------------------------
+def documento_exists(cpf: str, tipo: int) -> bool:
+    """Verifica se já existe um documento comprobatório para o CPF e tipo.
+
+    Args:
+        cpf: CPF (com ou sem formatação).
+        tipo: 0=treinamento, 1=1º turno, 2=2º turno.
+
+    Returns:
+        bool: True se já existir comprovante correspondente.
+    """
+    cpf_norm = sanitize_cpf(cpf)
+    if not cpf_norm:
+        return False
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM documento_comprovante WHERE cpf = %s AND tipo = %s LIMIT 1;",
+                (cpf_norm, tipo),
+            )
+            return cur.fetchone() is not None
+
+
+def insert_documento_comprovante(
+    cpf: Optional[str],
+    tipo: int,
+    nome_arquivo: Optional[str] = None,
+    caminho_arquivo: Optional[str] = None,
+    codigo_verificador: Optional[str] = None,
+    codigo_crc: Optional[str] = None,
+    url_conferencia: Optional[str] = None,
+    assinatura_valida: bool = False,
+    dias_ganhos: int = 0,
+    evitar_duplicata: bool = True,
+) -> Optional[int]:
+    """Insere um registro na tabela `documento_comprovante`.
+
+    Args:
+        cpf: CPF do participante (será normalizado para 11 dígitos).
+        tipo: 0=treinamento, 1=1º turno, 2=2º turno.
+        nome_arquivo: nome original do arquivo enviado.
+        caminho_arquivo: caminho do arquivo salvo no storage.
+        codigo_verificador: código verificador de autenticidade do documento.
+        codigo_crc: código CRC de autenticidade do documento.
+        url_conferencia: URL oficial de conferência da autenticidade.
+        assinatura_valida: se a assinatura foi identificada no documento.
+        dias_ganhos: dias contabilizados por este documento.
+        evitar_duplicata: se True, não insere caso já exista CPF+tipo.
+
+    Returns:
+        int | None: id do registro inserido, ou None se ignorado.
+    """
+    cpf_norm = sanitize_cpf(cpf) if cpf else None
+
+    if evitar_duplicata and cpf_norm and documento_exists(cpf_norm, tipo):
+        logger.info(
+            "Documento comprobatório já existente para CPF %s e tipo %s. Inserção ignorada.",
+            cpf_norm, tipo,
+        )
+        return None
+
+    query = """
+        INSERT INTO documento_comprovante
+            (cpf, tipo, nome_arquivo, caminho_arquivo, codigo_verificador,
+             codigo_crc, url_conferencia, assinatura_valida, dias_ganhos)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING id;
+    """
+    params = (
+        cpf_norm, tipo, nome_arquivo, caminho_arquivo, codigo_verificador,
+        codigo_crc, url_conferencia, assinatura_valida, dias_ganhos,
+    )
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, params)
+            novo_id = cur.fetchone()[0]
+    logger.info(
+        "Documento comprobatório inserido (id=%s, tipo=%s, cpf=%s, dias=%s).",
+        novo_id, tipo, cpf_norm, dias_ganhos,
+    )
+    return novo_id
+
+
+def buscar_documentos_cpf(cpf: str) -> list[dict]:
+    """Retorna os documentos comprobatórios do CPF informado.
+
+    Args:
+        cpf: CPF (com ou sem formatação).
+
+    Returns:
+        list[dict]: uma entrada por documento, ordenada por tipo.
+    """
+    cpf_limpo = sanitize_cpf(cpf)
+    if not cpf_limpo:
+        return []
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, cpf, tipo, nome_arquivo, caminho_arquivo, "
+                "codigo_verificador, codigo_crc, url_conferencia, "
+                "assinatura_valida, dias_ganhos, criado_em "
+                "FROM documento_comprovante WHERE cpf = %s ORDER BY tipo",
+                (cpf_limpo,),
+            )
+            linhas = cur.fetchall()
+
+    colunas = [
+        "id", "cpf", "tipo", "nome_arquivo", "caminho_arquivo",
+        "codigo_verificador", "codigo_crc", "url_conferencia",
+        "assinatura_valida", "dias_ganhos", "criado_em",
+    ]
+    return [dict(zip(colunas, linha)) for linha in linhas]
+
+
+def registrar_comparecimento(cpf: str, tipo: int, data: Optional[date] = None) -> bool:
+    """Marca o comparecimento como realizado na tabela `conv`.
+
+    Se já existir registro para o CPF+tipo, atualiza ``realizado`` para TRUE;
+    caso contrário, insere um novo registro já realizado.
+
+    Args:
+        cpf: CPF da pessoa (com ou sem formatação).
+        tipo: 0=treinamento, 1=1º turno, 2=2º turno.
+        data: data associada ao tipo (usada apenas em caso de inserção).
+
+    Returns:
+        bool: True se o registro foi atualizado ou criado.
+    """
+    cpf_norm = sanitize_cpf(cpf)
+    if not cpf_norm:
+        return False
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE conv SET realizado = TRUE WHERE cpf = %s AND tipo = %s;",
+                (cpf_norm, tipo),
+            )
+            if cur.rowcount == 0:
+                cur.execute(
+                    "INSERT INTO conv (cpf, tipo, data, realizado) "
+                    "VALUES (%s, %s, %s, TRUE);",
+                    (cpf_norm, tipo, data),
+                )
+    logger.info(
+        "Comparecimento registrado como REALIZADO (cpf=%s, tipo=%s).", cpf_norm, tipo
+    )
+    return True
+
+
 def insert_conv(
     cpf: Optional[str],
     tipo: int,

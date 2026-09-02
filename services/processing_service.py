@@ -8,9 +8,25 @@ from models.document import DocumentInfo
 from models.extraction import ExtractionResult
 from services.pdf_service import PDFService
 from services.extraction_service import extract_information
+from services.authenticity_service import verify_pdf_authenticity
 from config.settings import settings
 
 logger = logging.getLogger(__name__)
+
+
+def _obter_bytes(file_obj: BinaryIO | bytes | io.BytesIO) -> bytes:
+    """Converte o objeto de arquivo recebido em bytes, preservando sua posição."""
+    if isinstance(file_obj, bytes):
+        return file_obj
+    if hasattr(file_obj, "getbuffer"):
+        return bytes(file_obj.getbuffer())
+    if hasattr(file_obj, "read"):
+        current_pos = file_obj.tell() if hasattr(file_obj, "tell") else 0
+        content = file_obj.read()
+        if hasattr(file_obj, "seek"):
+            file_obj.seek(current_pos)
+        return content
+    return b""
 
 
 def _incluir_cpf_do_usuario(
@@ -143,13 +159,22 @@ class ProcessingService:
         temp_path: Path | None = None
         try:
             # 2. Armazena temporariamente
-            update_progress("Preparando leitura do arquivo...", 0.45)
+            update_progress("Preparando leitura do arquivo...", 0.40)
             temp_path = PDFService.save_temp_file(file_obj, filename)
             doc_info.temp_file_path = str(temp_path)
+
+            # 2.1. Verifica a validade do documento pela assinatura e pelo
+            # código de autenticidade antes de prosseguir com o cálculo/persistência
+            update_progress("Verificando assinatura e autenticidade...", 0.55)
+            autenticidade = verify_pdf_authenticity(_obter_bytes(file_obj), filename)
 
             # 3. Extrai informações
             update_progress("Extraindo dados e campos do PDF...", 0.75)
             extraction_result = extract_information(temp_path)
+
+            # Anexa o relatório de autenticidade ao resultado da extração
+            if isinstance(extraction_result.data, dict):
+                extraction_result.data["autenticidade"] = autenticidade.to_dict()
 
             # 3.0. Inclui o CPF informado no login entre os CPFs detectados
             _incluir_cpf_do_usuario(extraction_result, cpf_usuario)

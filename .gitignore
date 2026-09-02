@@ -8,3 +8,5 @@ coverage/
 !.env.example
 .abacus.donotdelete
 .pytest_cache/
+storage/
+__pycache__/

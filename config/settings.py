@@ -22,6 +22,9 @@ class Settings:
     
     # Diretório temporário de armazenamento
     STORAGE_DIR: Path = Path(os.getenv("STORAGE_DIR", "storage/temp"))
+
+    # Diretório definitivo dos documentos comprobatórios enviados por upload
+    DOCUMENTS_DIR: Path = Path(os.getenv("DOCUMENTS_DIR", "storage/documentos"))
     
     # Variáveis futuras para extensões (OCR / IA / Nuvem)
     GOOGLE_API_KEY: str | None = os.getenv("GOOGLE_API_KEY")
@@ -46,5 +49,6 @@ class Settings:
 
 settings = Settings()
 
-# Garante que o diretório de armazenamento exista
+# Garante que os diretórios de armazenamento existam
 settings.STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+settings.DOCUMENTS_DIR.mkdir(parents=True, exist_ok=True)
