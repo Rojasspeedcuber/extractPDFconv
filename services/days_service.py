@@ -1,9 +1,14 @@
 """Serviço de cálculo dos dias ganhos por participação nas eleições.
 
-Regra de negócio:
+Regra de negócio (dias por comprovante válido):
     - Treinamento  = 1 dia
     - 1º Turno     = 4 dias
-    - 2º Turno     = 4 dias (soma multiplicada por 2: 2 dias x 2)
+    - 2º Turno     = 4 dias
+
+O total é obtido somando os dias dos comprovantes válidos e multiplicando o
+resultado por 2 (MULTIPLICADOR_DIAS). Assim, o máximo possível é
+(1 + 4 + 4) x 2 = 18 dias. Os dias exibidos individualmente por tipo permanecem
+1, 4 e 4 — apenas a soma (total) é dobrada após o cálculo.
 
 Cada parcela somente é contabilizada quando o documento comprobatório
 correspondente foi enviado (upload) e considerado VÁLIDO pela verificação de
@@ -31,8 +36,14 @@ LABELS_POR_TIPO: dict[int, str] = {
     TIPO_SEGUNDO_TURNO: "2º Turno",
 }
 
-# Total máximo possível: 1 (treinamento) + 4 (1º turno) + 4 (2º turno) = 9 dias
-DIAS_MAXIMOS = sum(DIAS_POR_TIPO.values())
+# Multiplicador aplicado à soma dos dias (regra de negócio: soma x 2)
+MULTIPLICADOR_DIAS = 2
+
+# Soma dos dias por tipo antes do multiplicador: 1 + 4 + 4 = 9
+_SOMA_DIAS_POR_TIPO = sum(DIAS_POR_TIPO.values())
+
+# Total máximo possível já com o multiplicador: (1 + 4 + 4) x 2 = 18 dias
+DIAS_MAXIMOS = _SOMA_DIAS_POR_TIPO * MULTIPLICADOR_DIAS
 
 
 def calcular_dias_ganhos(tipos_comprovados: Iterable[int]) -> dict[str, Any]:
@@ -46,8 +57,8 @@ def calcular_dias_ganhos(tipos_comprovados: Iterable[int]) -> dict[str, Any]:
     Returns:
         dict: {
             "itens": [{"tipo", "label", "dias", "comprovado"}, ...],
-            "total": int,   # soma dos dias efetivamente ganhos
-            "maximo": int,  # total máximo possível (9)
+            "total": int,   # (soma dos dias comprovados) x 2
+            "maximo": int,  # total máximo possível (18)
         }
     """
     comprovados = {t for t in (tipos_comprovados or []) if t in DIAS_POR_TIPO}
@@ -66,5 +77,8 @@ def calcular_dias_ganhos(tipos_comprovados: Iterable[int]) -> dict[str, Any]:
                 "comprovado": comprovado,
             }
         )
+
+    # Regra de negócio: a soma dos dias é multiplicada por 2 após a soma.
+    total *= MULTIPLICADOR_DIAS
 
     return {"itens": itens, "total": total, "maximo": DIAS_MAXIMOS}
