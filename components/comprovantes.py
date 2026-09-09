@@ -37,7 +37,7 @@ def _comprovantes_da_sessao() -> dict[int, dict[str, Any]]:
     return st.session_state.setdefault("comprovantes_sessao", {})
 
 
-def _comprovantes_registrados() -> dict[int, dict[str, Any]]:
+def comprovantes_registrados() -> dict[int, dict[str, Any]]:
     """Consolida os comprovantes registrados (banco de dados + sessão).
 
     Quando a integração com o banco está ativa, os registros persistidos têm
@@ -208,7 +208,7 @@ def _render_formulario_upload() -> None:
         st.rerun()
 
 
-def _render_painel_dias_ganhos(registrados: dict[int, dict[str, Any]]) -> None:
+def render_painel_dias_ganhos(registrados: dict[int, dict[str, Any]]) -> None:
     """Renderiza o painel com o cálculo dos dias ganhos."""
     st.markdown("---")
     st.markdown("### 🏆 Cálculo dos Dias Ganho")
@@ -269,8 +269,17 @@ def _render_painel_dias_ganhos(registrados: dict[int, dict[str, Any]]) -> None:
         )
 
 
+def render_passo_comprovantes() -> None:
+    """Regras + formulário de envio de comprovantes (Passo 2 do fluxo).
+
+    Não inclui o painel de dias ganhos, que é exibido no Resumo consolidado.
+    """
+    _render_regras()
+    _render_formulario_upload()
+
+
 def render_secao_comprovantes() -> None:
-    """Renderiza a seção completa de comprovação de participação."""
+    """Renderiza a seção completa de comprovação (uso isolado/compatibilidade)."""
     st.subheader("🗳️ Comprovação de Participação nas Eleições")
     st.markdown(
         "Envie os documentos (PDF) que comprovam sua participação nas eleições. "
@@ -278,6 +287,5 @@ def render_secao_comprovantes() -> None:
         "cada documento antes de armazená-lo e calcular os dias ganhos."
     )
 
-    _render_regras()
-    _render_formulario_upload()
-    _render_painel_dias_ganhos(_comprovantes_registrados())
+    render_passo_comprovantes()
+    render_painel_dias_ganhos(comprovantes_registrados())
