@@ -28,18 +28,24 @@ def _render_value_safely(val: Any) -> None:
         st.write(str(val))
 
 
-def render_extraction_results(result: ExtractionResult):
-    """Renderiza a interface completa de resultados estruturados."""
+def render_carta_confirmacao(result: ExtractionResult) -> bool:
+    """Confirmação resumida do processamento da carta convocatória (Passo 1).
+
+    Exibe o status (sucesso/erro), o aviso de persistência no banco e o cartão
+    de destaque com os dados principais do convocado.
+
+    Returns:
+        bool: True quando a extração está válida; False em caso de erro.
+    """
     if result.status == "error":
         st.error(f"❌ Falha na extração: {result.error}")
-        return
+        return False
 
     st.success(f"✨ Extração realizada com sucesso! ({result.processing_time_seconds}s)")
 
-    # 1. Cabeçalho de Destaque
     data = result.data or {}
 
-    # 0. Status da gravação no banco de dados (se a integração estiver ativa)
+    # Status da gravação no banco de dados (se a integração estiver ativa)
     persistencia = data.get("_persistencia_banco")
     if isinstance(persistencia, dict):
         if persistencia.get("sucesso"):
@@ -56,8 +62,8 @@ def render_extraction_results(result: ExtractionResult):
                 st.info("🗄️ Registros já existiam no banco de dados (nenhuma duplicata inserida).")
         elif persistencia.get("erro"):
             st.warning(f"🗄️ Não foi possível gravar no banco: {persistencia['erro']}")
+    # Cartão de destaque do convocado
     is_convocacao = "nome_convocado" in data or "datas_identificadas" in data
-
     if is_convocacao and "nome_convocado" in data:
         local_vot = data.get('local_votacao', 'Local não informado')
         endereco_vot = data.get('endereco_local_votacao', '')
@@ -84,7 +90,17 @@ def render_extraction_results(result: ExtractionResult):
             unsafe_allow_html=True
         )
 
-    # 2. Painel de Datas em Destaque (Se presente)
+    return True
+
+
+def render_detalhes_extracao(result: ExtractionResult) -> None:
+    """Detalhes completos da extração (datas, campos e JSON) para o Resumo."""
+    if result.status == "error":
+        return
+
+    data = result.data or {}
+
+    # Painel de datas em destaque
     datas_info = data.get("datas_identificadas")
     if datas_info and isinstance(datas_info, dict):
         st.markdown("### 📅 Cronograma e Datas do Documento")
@@ -159,7 +175,7 @@ def render_extraction_results(result: ExtractionResult):
 
         st.divider()
 
-    # 3. Lista Consolidada de Todas as Datas Encontradas
+    # Lista consolidada de todas as datas encontradas
     todas_datas = data.get("todas_as_datas_encontradas") or data.get("datas_identificadas")
     if todas_datas and isinstance(todas_datas, list):
         st.markdown("#### 📆 Todas as Datas Detectadas no Documento")
@@ -168,7 +184,7 @@ def render_extraction_results(result: ExtractionResult):
             with cols[i % len(cols)]:
                 st.code(dt, language="text")
 
-    # 4. Exibição Geral de Campos Estruturados (Genérico para qualquer PDF)
+    # Campos estruturados (genérico para qualquer PDF)
     st.markdown("### 📊 Informações Estruturadas do Documento")
     
     # Renderiza os campos não especiais em formato de cards / tabelas
@@ -188,7 +204,7 @@ def render_extraction_results(result: ExtractionResult):
     else:
         st.info("Nenhum campo específico adicional extraído.")
 
-    # 5. Exportação e Download
+    # Exportação e download
     st.divider()
     col_dl1, col_dl2 = st.columns([2, 1])
     with col_dl1:
@@ -203,11 +219,16 @@ def render_extraction_results(result: ExtractionResult):
             use_container_width=True
         )
 
-    # 6. Visualizador JSON Bruto
+    # Visualizador JSON bruto
     with st.expander("🛠️ Ver Estrutura JSON Completa"):
         st.json(result.data)
 
-    # 7. Registros do usuário logado no banco de dados
+
+def render_extraction_results(result: ExtractionResult) -> None:
+    """Composição compatível: confirmação + detalhes + registros do usuário."""
+    if not render_carta_confirmacao(result):
+        return
+    render_detalhes_extracao(result)
     render_registros_usuario()
 
 
