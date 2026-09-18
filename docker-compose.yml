@@ -1,21 +1,16 @@
 version: '3.8'
 
 services:
-  # Banco de dados PostgreSQL
-  postgres:
-    image: postgres:15-alpine
-    container_name: postgres_convocacoes
-    environment:
-      POSTGRES_USER: eleicoes_user
-      POSTGRES_PASSWORD: senha123
-      POSTGRES_DB: convocacoes
+  # Banco de dados MongoDB
+  mongo:
+    image: mongo:7
+    container_name: mongo_convocacoes
     ports:
-      - "5432:5432"
+      - "27017:27017"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ./database/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+      - mongo_data:/data/db
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U eleicoes_user -d convocacoes"]
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -33,14 +28,14 @@ services:
       - PORT=8501
       - MAX_FILE_SIZE_MB=20
       - USE_MOCK_EXTRACTION=false
-      - DATABASE_URL=postgresql://eleicoes_user:senha123@postgres:5432/convocacoes
+      - MONGO_URI=mongodb://mongo:27017/convocacoes
       - PERSIST_TO_DB=true
     volumes:
       - ./storage/temp:/app/storage/temp
     depends_on:
-      postgres:
+      mongo:
         condition: service_healthy
     restart: unless-stopped
 
 volumes:
-  postgres_data:
+  mongo_data:
