@@ -1,17 +1,20 @@
 """Serviço de armazenamento dos documentos comprobatórios de participação.
 
 Recebe os PDFs enviados por upload (já validados pelo serviço de
-autenticidade), grava os arquivos em disco e registra os metadados no banco
-de dados (quando a integração PostgreSQL estiver ativa). Também marca o
-comparecimento correspondente como realizado na tabela ``conv``.
+autenticidade), grava os arquivos no **MongoDB (GridFS)** e registra os
+metadados na collection ``documento_comprovante``. Também marca o
+comparecimento correspondente como realizado na collection ``conv``.
+
+Não há gravação em disco: se o MongoDB estiver indisponível (ou a persistência
+estiver desativada), o upload é **recusado** com uma mensagem clara. Se a
+gravação dos metadados falhar após o upload do PDF, o arquivo órfão é apagado
+do GridFS (compensação).
 """
 from __future__ import annotations
 
 import re
-import time
 import logging
 from datetime import date, datetime
-from pathlib import Path
 from typing import Any, Optional
 
 from config.settings import settings
@@ -67,13 +70,6 @@ def extrair_data_evento(texto: str, tipo: int, report: AuthenticityReport | None
         return None
 
 
-def _nome_arquivo_seguro(filename: str) -> str:
-    """Sanitiza o nome do arquivo removendo caracteres inseguros."""
-    base = Path(filename or "documento.pdf").name
-    seguro = re.sub(r"[^\w.\- ]+", "_", base).strip() or "documento.pdf"
-    return seguro[:120]
-
-
 def salvar_documento_comprovante(
     cpf_usuario: str | None,
     tipo: int,
@@ -82,7 +78,7 @@ def salvar_documento_comprovante(
     report: AuthenticityReport,
     data_evento: Optional[date] = None,
 ) -> dict[str, Any]:
-    """Armazena um documento comprobatório válido (arquivo + banco de dados).
+    """Armazena um documento comprobatório válido no MongoDB (GridFS + metadados).
 
     Args:
         cpf_usuario: CPF do usuário autenticado (qualquer formato).
@@ -94,13 +90,13 @@ def salvar_documento_comprovante(
 
     Returns:
         dict: resumo da operação:
-            sucesso, tipo, dias, caminho, persistido, duplicado, erro.
+            sucesso, tipo, dias, gridfs_file_id, persistido, duplicado, erro.
     """
     resumo: dict[str, Any] = {
         "sucesso": False,
         "tipo": tipo,
         "dias": 0,
-        "caminho": None,
+        "gridfs_file_id": None,
         "persistido": False,
         "duplicado": False,
         "erro": None,
@@ -123,58 +119,76 @@ def salvar_documento_comprovante(
         resumo["erro"] = "CPF do usuário inválido; não é possível vincular o documento."
         return resumo
 
-    # Evita duplicidade no banco antes de gravar o arquivo em disco
-    if settings.PERSIST_TO_DB:
-        try:
-            from database import db
+    if not settings.PERSIST_TO_DB:
+        resumo["erro"] = (
+            "Persistência desativada (PERSIST_TO_DB=false): os documentos são "
+            "armazenados apenas no MongoDB. Configure MONGO_URI e ative a "
+            "persistência para permitir o envio."
+        )
+        logger.warning(resumo["erro"])
+        return resumo
 
-            if db.documento_exists(cpf_norm, tipo):
-                resumo["duplicado"] = True
-                resumo["erro"] = (
-                    f"Já existe um documento comprobatório registrado para "
-                    f"{LABELS_POR_TIPO[tipo]}. O envio foi ignorado (sem duplicatas)."
-                )
-                logger.info(resumo["erro"])
-                return resumo
-        except Exception as exc:  # noqa: BLE001 - indisponibilidade do banco não impede salvar em disco
-            logger.warning("Não foi possível verificar duplicatas no banco: %s", exc)
+    from database import db
 
-    # 1. Grava o arquivo em storage/documentos/<cpf>/
+    # 0. Verifica duplicata antes de gravar o PDF; sem banco, upload é recusado
     try:
-        pasta = settings.DOCUMENTS_DIR / cpf_norm
-        pasta.mkdir(parents=True, exist_ok=True)
-        rotulo = re.sub(r"[^\w]+", "_", LABELS_POR_TIPO[tipo])
-        destino = pasta / f"{rotulo}_{int(time.time() * 1000)}_{_nome_arquivo_seguro(filename)}"
-        destino.write_bytes(file_bytes)
-        resumo["caminho"] = str(destino)
+        if db.documento_exists(cpf_norm, tipo):
+            resumo["duplicado"] = True
+            resumo["erro"] = (
+                f"Já existe um documento comprobatório registrado para "
+                f"{LABELS_POR_TIPO[tipo]}. O envio foi ignorado (sem duplicatas)."
+            )
+            logger.info(resumo["erro"])
+            return resumo
+    except Exception as exc:  # noqa: BLE001 - sem MongoDB não há onde gravar
+        resumo["erro"] = f"MongoDB indisponível; upload recusado: {exc}"
+        logger.error(resumo["erro"])
+        return resumo
+
+    # 1. Grava o PDF no GridFS
+    try:
+        arquivo_id = db.upload_pdf(cpf_norm, tipo, filename, file_bytes)
+        resumo["gridfs_file_id"] = arquivo_id
         resumo["dias"] = DIAS_POR_TIPO[tipo]
-        logger.info("Documento comprobatório salvo em %s", destino)
+        logger.info("Documento comprobatório gravado no GridFS (id=%s).", arquivo_id)
     except Exception as exc:  # noqa: BLE001
-        resumo["erro"] = f"Falha ao gravar o arquivo em disco: {exc}"
+        resumo["erro"] = f"Falha ao gravar o PDF no MongoDB (GridFS): {exc}"
         logger.error(resumo["erro"], exc_info=True)
         return resumo
 
-    # 2. Registra os metadados no banco e marca o comparecimento como realizado
-    if settings.PERSIST_TO_DB:
-        try:
-            from database import db
-
-            novo_id = db.insert_documento_comprovante(
-                cpf=cpf_norm,
-                tipo=tipo,
-                nome_arquivo=filename,
-                caminho_arquivo=resumo["caminho"],
-                codigo_verificador=report.codigo_verificador,
-                codigo_crc=report.codigo_crc,
-                url_conferencia=report.url_conferencia,
-                assinatura_valida=report.possui_assinatura,
-                dias_ganhos=resumo["dias"],
+    # 2. Registra os metadados e marca o comparecimento como realizado.
+    #    Em caso de falha, apaga o arquivo recém-gravado (compensação).
+    try:
+        novo_id = db.insert_documento_comprovante(
+            cpf=cpf_norm,
+            tipo=tipo,
+            nome_arquivo=filename,
+            gridfs_file_id=arquivo_id,
+            codigo_verificador=report.codigo_verificador,
+            codigo_crc=report.codigo_crc,
+            url_conferencia=report.url_conferencia,
+            assinatura_valida=report.possui_assinatura,
+            dias_ganhos=resumo["dias"],
+        )
+        if novo_id is None:
+            # Duplicata detectada pelo índice único após a gravação do PDF
+            db.apagar_pdf(arquivo_id)
+            resumo["gridfs_file_id"] = None
+            resumo["duplicado"] = True
+            resumo["erro"] = (
+                f"Já existe um documento comprobatório registrado para "
+                f"{LABELS_POR_TIPO[tipo]}. O envio foi ignorado (sem duplicatas)."
             )
-            resumo["persistido"] = novo_id is not None
-            db.registrar_comparecimento(cpf_norm, tipo, data_evento)
-        except Exception as exc:  # noqa: BLE001 - falha de banco não invalida o arquivo salvo
-            resumo["erro"] = f"Arquivo salvo, porém falha ao gravar no banco: {exc}"
-            logger.error(resumo["erro"], exc_info=True)
+            logger.info(resumo["erro"])
+            return resumo
+        resumo["persistido"] = True
+        db.registrar_comparecimento(cpf_norm, tipo, data_evento)
+    except Exception as exc:  # noqa: BLE001 - falha total: remove o órfão
+        db.apagar_pdf(arquivo_id)
+        resumo["gridfs_file_id"] = None
+        resumo["erro"] = f"PDF gravado, porém falha ao registrar os metadados: {exc}"
+        logger.error(resumo["erro"], exc_info=True)
+        return resumo
 
     resumo["sucesso"] = True
     return resumo

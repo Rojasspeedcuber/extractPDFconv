@@ -159,11 +159,7 @@ def _processar_upload(uploaded, tipo: int) -> None:
         "persistido": resumo.get("persistido", False),
     }
 
-    persistido_txt = (
-        "Registro gravado no banco de dados."
-        if resumo.get("persistido")
-        else "Banco de dados indisponível — documento salvo apenas no servidor."
-    )
+    persistido_txt = "Documento gravado no MongoDB (GridFS)."
     st.success(
         f"📦 Documento armazenado com sucesso! Você ganhou "
         f"**{resumo['dias']} dia(s)** por **{LABELS_POR_TIPO[tipo]}**. {persistido_txt}"
@@ -244,7 +240,7 @@ def render_painel_dias_ganhos(registrados: dict[int, dict[str, Any]]) -> None:
         doc = registrados[tipo]
         verificador = doc.get("codigo_verificador") or "—"
         crc = doc.get("codigo_crc") or "—"
-        origem = "🗄️ banco de dados" if doc.get("persistido") else "💾 servidor (sessão)"
+        origem = "🗄️ MongoDB (GridFS)" if doc.get("persistido") else "💾 sessão"
         st.markdown(
             f"""
             <div style="border:1px solid #e2e8f0; border-radius:10px; padding:12px 16px;
