@@ -7,6 +7,10 @@ from datetime import date
 
 from database import db
 from database import persistence_service as ps
+from types import SimpleNamespace
+
+from bson import ObjectId
+from pymongo.errors import DuplicateKeyError
 
 
 # ---------------------------------------------------------------------------
@@ -126,3 +130,136 @@ def test_auth_cpf_valido():
     assert auth._cpf_valido("123") is None
     assert auth._cpf_valido(None) is None
     assert auth._formatar_cpf("11144477735") == "111.444.777-35"
+
+
+# ---------------------------------------------------------------------------
+# Dublês para operações MongoDB (sem servidor real)
+# ---------------------------------------------------------------------------
+class _FakeCollection:
+    def __init__(self):
+        self.inseridos = []
+        self.erro = None
+
+    def insert_one(self, documento):
+        if self.erro is not None:
+            raise self.erro
+        self.inseridos.append(documento)
+        return SimpleNamespace(inserted_id=ObjectId())
+
+    def find_one(self, filtro, projecao=None):
+        return None
+
+
+class _FakeDb:
+    def __init__(self):
+        self.colecoes = {}
+
+    def __getitem__(self, nome):
+        return self.colecoes.setdefault(nome, _FakeCollection())
+
+
+# ---------------------------------------------------------------------------
+# Mapeamento de documentos MongoDB
+# ---------------------------------------------------------------------------
+def test_mapear_documento_converte_ids():
+    oid = ObjectId()
+    gridfs_id = ObjectId()
+    resultado = db._mapear_documento(
+        {"_id": oid, "tipo": 1, "gridfs_file_id": gridfs_id}
+    )
+    assert resultado["id"] == str(oid)
+    assert "_id" not in resultado
+    assert resultado["gridfs_file_id"] == str(gridfs_id)
+
+
+def test_mapear_documento_sem_gridfs():
+    oid = ObjectId()
+    resultado = db._mapear_documento({"_id": oid, "tipo": 0})
+    assert resultado == {"id": str(oid), "tipo": 0}
+
+
+# ---------------------------------------------------------------------------
+# Inserção de documento comprobatório (com dublês)
+# ---------------------------------------------------------------------------
+def test_insert_documento_comprovante_grava_campos(monkeypatch):
+    fake = _FakeDb()
+    monkeypatch.setattr(db, "get_database", lambda: fake)
+    gridfs_id = ObjectId()
+
+    novo_id = db.insert_documento_comprovante(
+        cpf="111.444.777-35",
+        tipo=1,
+        nome_arquivo="comprovante.pdf",
+        gridfs_file_id=str(gridfs_id),
+        codigo_verificador="3443939",
+        codigo_crc="BCE2B28E",
+        url_conferencia="https://example.gov.br/conferencia",
+        assinatura_valida=True,
+        dias_ganhos=4,
+    )
+
+    assert novo_id is not None
+    gravado = fake["documento_comprovante"].inseridos[0]
+    assert gravado["cpf"] == "11144477735"          # CPF normalizado
+    assert gravado["tipo"] == 1
+    assert gravado["nome_arquivo"] == "comprovante.pdf"
+    assert gravado["gridfs_file_id"] == gridfs_id   # ObjectId, não str
+    assert gravado["assinatura_valida"] is True
+    assert gravado["dias_ganhos"] == 4
+    assert gravado["criado_em"] is not None
+
+
+def test_insert_documento_comprovante_duplicado_retorna_none(monkeypatch):
+    fake = _FakeDb()
+    fake["documento_comprovante"].erro = DuplicateKeyError("E11000 duplicate key")
+    monkeypatch.setattr(db, "get_database", lambda: fake)
+
+    resultado = db.insert_documento_comprovante(cpf="11144477735", tipo=1)
+    assert resultado is None
+
+
+def test_insert_documento_gridfs_id_invalido_lanca_erro(monkeypatch):
+    import pytest
+
+    fake = _FakeDb()
+    monkeypatch.setattr(db, "get_database", lambda: fake)
+    with pytest.raises(db.DatabaseError):
+        db.insert_documento_comprovante(
+            cpf="11144477735", tipo=1, gridfs_file_id="nao-e-objectid"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Comparecimento (upsert)
+# ---------------------------------------------------------------------------
+def test_registrar_comparecimento_faz_upsert(monkeypatch):
+    fake = _FakeDb()
+    atualizacoes = []
+    fake["conv"].update_one = lambda filtro, update, upsert=False: atualizacoes.append(
+        (filtro, update, upsert)
+    )
+    monkeypatch.setattr(db, "get_database", lambda: fake)
+
+    assert db.registrar_comparecimento("111.444.777-35", 1) is True
+    filtro, update, upsert = atualizacoes[0]
+    assert filtro == {"cpf": "11144477735", "tipo": 1}
+    assert update["$set"] == {"realizado": True}
+    assert update["$setOnInsert"]["cpf"] == "11144477735"
+    assert upsert is True
+
+
+def test_registrar_comparecimento_cpf_invalido(monkeypatch):
+    fake = _FakeDb()
+    monkeypatch.setattr(db, "get_database", lambda: fake)
+    assert db.registrar_comparecimento("123", 1) is False
+
+
+# ---------------------------------------------------------------------------
+# URI ausente
+# ---------------------------------------------------------------------------
+def test_get_mongo_uri_ausente_lanca_erro(monkeypatch):
+    monkeypatch.delenv("MONGO_URI", raising=False)
+    import pytest
+
+    with pytest.raises(db.DatabaseError):
+        db.get_mongo_uri()

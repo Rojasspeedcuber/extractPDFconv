@@ -1,23 +1,29 @@
-"""Módulo de acesso ao banco de dados PostgreSQL para o projeto extractPDFconv.
+"""Módulo de acesso ao banco de dados MongoDB para o projeto extractPDFconv.
 
 Responsável por:
-  - Abrir conexão com o PostgreSQL a partir da variável de ambiente DATABASE_URL.
-  - Inserir registros nas tabelas `instrumento_convocacao` e `conv`.
+  - Conectar ao MongoDB a partir da variável de ambiente MONGO_URI.
+  - Criar/verificar os índices das collections (``ensure_indexes``).
+  - Inserir e consultar documentos em `instrumento_convocacao`, `conv` e
+    `documento_comprovante`.
+  - Armazenar/ler os PDFs comprobatórios no GridFS (bucket ``documentos``).
   - Verificar a existência de um CPF antes de inserir (evitando duplicatas).
 
 Todas as mensagens de log estão em português para facilitar o acompanhamento.
 """
 from __future__ import annotations
 
+import io
 import os
 import re
 import logging
-from contextlib import contextmanager
-from datetime import date
-from typing import Any, Iterator, Optional
+from datetime import date, datetime, timezone
+from typing import Any, Optional
 
-import psycopg2
-from psycopg2.extras import RealDictCursor
+import gridfs
+import pymongo
+from bson import ObjectId
+from bson.errors import InvalidId
+from pymongo.errors import DuplicateKeyError, PyMongoError
 from dotenv import load_dotenv
 
 # Carrega variáveis de ambiente do arquivo .env (se existir)
@@ -25,53 +31,52 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
+NOME_BANCO_PADRAO = "convocacoes"
+BUCKET_DOCUMENTOS = "documentos"
+
 
 class DatabaseError(Exception):
     """Erro genérico relacionado a operações de banco de dados."""
 
 
-def get_database_url() -> str:
-    """Retorna a URL de conexão do PostgreSQL a partir do ambiente.
+def get_mongo_uri() -> str:
+    """Retorna a URI de conexão do MongoDB a partir do ambiente.
 
     Returns:
-        str: valor de DATABASE_URL.
+        str: valor de MONGO_URI.
 
     Raises:
         DatabaseError: se a variável de ambiente não estiver configurada.
     """
-    url = os.getenv("DATABASE_URL")
-    if not url:
+    uri = os.getenv("MONGO_URI")
+    if not uri:
         raise DatabaseError(
-            "A variável de ambiente DATABASE_URL não está definida. "
+            "A variável de ambiente MONGO_URI não está definida. "
             "Configure-a no arquivo .env (veja o .env.example)."
         )
-    return url
+    return uri
 
 
-@contextmanager
-def get_connection() -> Iterator["psycopg2.extensions.connection"]:
-    """Gerenciador de contexto que abre e fecha uma conexão com o PostgreSQL.
+def get_database() -> "pymongo.database.Database":
+    """Retorna o banco MongoDB configurado (conexão criada sob demanda).
 
-    Faz commit automático em caso de sucesso e rollback em caso de erro.
+    O nome do banco é extraído do path da MONGO_URI; na ausência, usa
+    ``convocacoes``.
 
-    Yields:
-        psycopg2.extensions.connection: conexão ativa com o banco.
+    Raises:
+        DatabaseError: se a conexão não puder ser criada.
     """
-    conn = None
     try:
-        conn = psycopg2.connect(get_database_url())
-        logger.info("Conexão com o PostgreSQL estabelecida com sucesso.")
-        yield conn
-        conn.commit()
-    except psycopg2.Error as exc:
-        if conn is not None:
-            conn.rollback()
-        logger.error("Erro na operação com o banco de dados: %s", exc)
-        raise DatabaseError(f"Falha na operação com o banco de dados: {exc}") from exc
-    finally:
-        if conn is not None:
-            conn.close()
-            logger.info("Conexão com o PostgreSQL encerrada.")
+        cliente = pymongo.MongoClient(get_mongo_uri(), serverSelectionTimeoutMS=5000)
+        return cliente.get_default_database(default_db_name=NOME_BANCO_PADRAO)
+    except PyMongoError as exc:
+        logger.error("Erro ao conectar ao MongoDB: %s", exc)
+        raise DatabaseError(f"Falha na conexão com o MongoDB: {exc}") from exc
+
+
+def _agora() -> datetime:
+    """Timestamp UTC atual (substitui o ``DEFAULT now()`` do PostgreSQL)."""
+    return datetime.now(timezone.utc)
 
 
 def sanitize_cpf(cpf: Optional[str]) -> Optional[str]:
@@ -92,96 +97,129 @@ def sanitize_cpf(cpf: Optional[str]) -> Optional[str]:
     return digits
 
 
+def _mapear_documento(doc: dict[str, Any]) -> dict[str, Any]:
+    """Converte um documento MongoDB no formato esperado pelos consumidores.
+
+    - ``_id`` (ObjectId) -> ``id`` (str)
+    - ``gridfs_file_id`` (ObjectId) -> str (quando presente)
+    """
+    resultado = dict(doc)
+    resultado["id"] = str(resultado.pop("_id"))
+    arquivo = resultado.get("gridfs_file_id")
+    if arquivo is not None:
+        resultado["gridfs_file_id"] = str(arquivo)
+    return resultado
+
+
 def test_connection() -> bool:
-    """Testa a conexão com o banco executando um SELECT simples.
+    """Testa a conexão com o banco executando um ping no MongoDB.
 
     Returns:
         bool: True se a conexão foi bem sucedida.
     """
     try:
-        with get_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT 1;")
-                cur.fetchone()
-        logger.info("Teste de conexão com o banco concluído com sucesso.")
+        banco = get_database()
+        banco.client.admin.command("ping")
+        logger.info("Teste de conexão com o MongoDB concluído com sucesso.")
         return True
-    except DatabaseError:
+    except (DatabaseError, PyMongoError) as exc:
+        logger.error("Teste de conexão com o MongoDB falhou: %s", exc)
         return False
 
 
-def init_schema(schema_path: Optional[str] = None) -> None:
-    """Executa o script de schema (schema.sql) para criar as tabelas.
+def ensure_indexes() -> None:
+    """Cria/verifica os índices das collections (operação idempotente).
 
-    Args:
-        schema_path: caminho do arquivo SQL. Se None, usa database/schema.sql.
+    Substitui o antigo ``database/schema.sql`` do PostgreSQL. Índices únicos
+    usam ``partialFilterExpression`` para ignorar CPFs nulos (equivalente ao
+    ``WHERE cpf IS NOT NULL`` do Postgres).
     """
-    if schema_path is None:
-        schema_path = os.path.join(os.path.dirname(__file__), "schema.sql")
-
-    with open(schema_path, "r", encoding="utf-8") as fh:
-        sql = fh.read()
-
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(sql)
-    logger.info("Schema do banco de dados criado/verificado com sucesso.")
+    banco = get_database()
+    try:
+        banco["documento_comprovante"].create_index(
+            [("cpf", pymongo.ASCENDING), ("tipo", pymongo.ASCENDING)],
+            unique=True,
+            name="uq_documento_comprovante_cpf_tipo",
+            partialFilterExpression={"cpf": {"$type": "string"}},
+        )
+        banco["documento_comprovante"].create_index(
+            [("tipo", pymongo.ASCENDING)], name="idx_documento_comprovante_tipo"
+        )
+        banco["instrumento_convocacao"].create_index(
+            [("convocado_cpf", pymongo.ASCENDING), ("tipo", pymongo.ASCENDING)],
+            unique=True,
+            name="uq_instrumento_convocacao_cpf_tipo",
+            partialFilterExpression={"convocado_cpf": {"$type": "string"}},
+        )
+        banco["instrumento_convocacao"].create_index(
+            [("tipo", pymongo.ASCENDING)], name="idx_instrumento_convocacao_tipo"
+        )
+        banco["conv"].create_index(
+            [("cpf", pymongo.ASCENDING), ("tipo", pymongo.ASCENDING)],
+            unique=True,
+            name="uq_conv_cpf_tipo",
+            partialFilterExpression={"cpf": {"$type": "string"}},
+        )
+        banco["conv"].create_index([("cpf", pymongo.ASCENDING)], name="idx_conv_cpf")
+    except PyMongoError as exc:
+        logger.error("Erro ao criar índices no MongoDB: %s", exc)
+        raise DatabaseError(f"Falha ao criar índices no MongoDB: {exc}") from exc
+    logger.info("Índices do MongoDB criados/verificados com sucesso.")
 
 
 # ---------------------------------------------------------------------------
 # Verificações de existência (evita duplicatas)
 # ---------------------------------------------------------------------------
 def cpf_exists_in_conv(cpf: str, tipo: Optional[int] = None) -> bool:
-    """Verifica se já existe um registro na tabela `conv` para o CPF informado.
+    """Verifica se já existe um documento na collection `conv` para o CPF.
 
     Args:
         cpf: CPF (com ou sem formatação).
         tipo: se informado, restringe a verificação ao tipo de convocação.
 
     Returns:
-        bool: True se já existir registro correspondente.
+        bool: True se já existir documento correspondente.
     """
     cpf_norm = sanitize_cpf(cpf)
     if not cpf_norm:
         return False
 
-    query = "SELECT 1 FROM conv WHERE cpf = %s"
-    params: list[Any] = [cpf_norm]
+    filtro: dict[str, Any] = {"cpf": cpf_norm}
     if tipo is not None:
-        query += " AND tipo = %s"
-        params.append(tipo)
-    query += " LIMIT 1;"
+        filtro["tipo"] = tipo
 
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(query, params)
-            return cur.fetchone() is not None
+    banco = get_database()
+    try:
+        return banco["conv"].find_one(filtro, {"_id": 1}) is not None
+    except PyMongoError as exc:
+        raise DatabaseError(f"Falha ao consultar a collection conv: {exc}") from exc
 
 
 def cpf_exists_in_instrumento(cpf: str, tipo: Optional[int] = None) -> bool:
-    """Verifica se já existe um registro em `instrumento_convocacao` para o CPF.
+    """Verifica se já existe um documento em `instrumento_convocacao` para o CPF.
 
     Args:
         cpf: CPF (com ou sem formatação).
         tipo: se informado, restringe a verificação ao tipo de convocação.
 
     Returns:
-        bool: True se já existir registro correspondente.
+        bool: True se já existir documento correspondente.
     """
     cpf_norm = sanitize_cpf(cpf)
     if not cpf_norm:
         return False
 
-    query = "SELECT 1 FROM instrumento_convocacao WHERE convocado_cpf = %s"
-    params: list[Any] = [cpf_norm]
+    filtro: dict[str, Any] = {"convocado_cpf": cpf_norm}
     if tipo is not None:
-        query += " AND tipo = %s"
-        params.append(tipo)
-    query += " LIMIT 1;"
+        filtro["tipo"] = tipo
 
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(query, params)
-            return cur.fetchone() is not None
+    banco = get_database()
+    try:
+        return banco["instrumento_convocacao"].find_one(filtro, {"_id": 1}) is not None
+    except PyMongoError as exc:
+        raise DatabaseError(
+            f"Falha ao consultar a collection instrumento_convocacao: {exc}"
+        ) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -194,8 +232,8 @@ def insert_instrumento_convocacao(
     convocado_cpf: Optional[str] = None,
     orgao_convocador: Optional[str] = None,
     evitar_duplicata: bool = True,
-) -> Optional[int]:
-    """Insere um registro na tabela `instrumento_convocacao`.
+) -> Optional[str]:
+    """Insere um documento na collection `instrumento_convocacao`.
 
     Args:
         tipo: 0=treinamento, 1=1º turno, 2=2º turno.
@@ -206,7 +244,7 @@ def insert_instrumento_convocacao(
         evitar_duplicata: se True, não insere caso já exista CPF+tipo.
 
     Returns:
-        int | None: id do registro inserido, ou None se ignorado.
+        str | None: id do documento inserido, ou None se ignorado (duplicata).
     """
     cpf_norm = sanitize_cpf(convocado_cpf) if convocado_cpf else None
 
@@ -217,16 +255,30 @@ def insert_instrumento_convocacao(
         )
         return None
 
-    query = """
-        INSERT INTO instrumento_convocacao
-            (tipo, data, responsavel, convocado_cpf, orgao_convocador)
-        VALUES (%s, %s, %s, %s, %s)
-        RETURNING id;
-    """
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(query, (tipo, data, responsavel, cpf_norm, orgao_convocador))
-            novo_id = cur.fetchone()[0]
+    documento = {
+        "tipo": tipo,
+        "data": data,
+        "responsavel": responsavel,
+        "convocado_cpf": cpf_norm,
+        "orgao_convocador": orgao_convocador,
+        "criado_em": _agora(),
+    }
+    banco = get_database()
+    try:
+        resultado = banco["instrumento_convocacao"].insert_one(documento)
+    except DuplicateKeyError:
+        logger.info(
+            "Instrumento de convocação já existente (índice único) para CPF %s e tipo %s.",
+            cpf_norm, tipo,
+        )
+        return None
+    except PyMongoError as exc:
+        logger.error("Erro ao inserir instrumento de convocação: %s", exc)
+        raise DatabaseError(
+            f"Falha ao inserir instrumento de convocação: {exc}"
+        ) from exc
+
+    novo_id = str(resultado.inserted_id)
     logger.info(
         "Instrumento de convocação inserido (id=%s, tipo=%s, cpf=%s).",
         novo_id, tipo, cpf_norm,
@@ -241,43 +293,35 @@ def buscar_registros_cpf(cpf: str) -> dict:
         cpf: CPF (com ou sem formatação).
 
     Returns:
-        dict: {"instrumentos": [...], "conv": [...]} com uma lista de dicts por linha.
+        dict: {"instrumentos": [...], "conv": [...]} com uma lista de dicts.
     """
     cpf_limpo = sanitize_cpf(cpf)
     if not cpf_limpo:
         return {"instrumentos": [], "conv": []}
 
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT id, tipo, data, responsavel, orgao_convocador, criado_em "
-                "FROM instrumento_convocacao WHERE convocado_cpf = %s ORDER BY tipo",
-                (cpf_limpo,),
-            )
-            instrumentos = cur.fetchall()
-            cur.execute(
-                "SELECT id, cpf, tipo, data, realizado, criado_em "
-                "FROM conv WHERE cpf = %s ORDER BY tipo",
-                (cpf_limpo,),
-            )
-            conv = cur.fetchall()
-
-    return {
-        "instrumentos": [
-            dict(zip(
-                ["id", "tipo", "data", "responsavel", "orgao_convocador", "criado_em"], r
-            ))
-            for r in instrumentos
-        ],
-        "conv": [
-            dict(zip(["id", "cpf", "tipo", "data", "realizado", "criado_em"], r))
-            for r in conv
-        ],
-    }
+    banco = get_database()
+    try:
+        instrumentos = banco["instrumento_convocacao"].find(
+            {"convocado_cpf": cpf_limpo},
+            {
+                "tipo": 1, "data": 1, "responsavel": 1,
+                "orgao_convocador": 1, "criado_em": 1,
+            },
+        ).sort("tipo", pymongo.ASCENDING)
+        conv = banco["conv"].find(
+            {"cpf": cpf_limpo},
+            {"cpf": 1, "tipo": 1, "data": 1, "realizado": 1, "criado_em": 1},
+        ).sort("tipo", pymongo.ASCENDING)
+        return {
+            "instrumentos": [_mapear_documento(d) for d in instrumentos],
+            "conv": [_mapear_documento(d) for d in conv],
+        }
+    except PyMongoError as exc:
+        raise DatabaseError(f"Falha ao consultar registros do CPF: {exc}") from exc
 
 
 # ---------------------------------------------------------------------------
-# Documentos comprobatórios de participação (upload de PDFs)
+# Documentos comprobatórios de participação (upload de PDFs no GridFS)
 # ---------------------------------------------------------------------------
 def documento_exists(cpf: str, tipo: int) -> bool:
     """Verifica se já existe um documento comprobatório para o CPF e tipo.
@@ -293,34 +337,37 @@ def documento_exists(cpf: str, tipo: int) -> bool:
     if not cpf_norm:
         return False
 
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT 1 FROM documento_comprovante WHERE cpf = %s AND tipo = %s LIMIT 1;",
-                (cpf_norm, tipo),
-            )
-            return cur.fetchone() is not None
+    banco = get_database()
+    try:
+        achou = banco["documento_comprovante"].find_one(
+            {"cpf": cpf_norm, "tipo": tipo}, {"_id": 1}
+        )
+        return achou is not None
+    except PyMongoError as exc:
+        raise DatabaseError(
+            f"Falha ao consultar documentos comprobatórios: {exc}"
+        ) from exc
 
 
 def insert_documento_comprovante(
     cpf: Optional[str],
     tipo: int,
     nome_arquivo: Optional[str] = None,
-    caminho_arquivo: Optional[str] = None,
+    gridfs_file_id: Optional[str] = None,
     codigo_verificador: Optional[str] = None,
     codigo_crc: Optional[str] = None,
     url_conferencia: Optional[str] = None,
     assinatura_valida: bool = False,
     dias_ganhos: int = 0,
     evitar_duplicata: bool = True,
-) -> Optional[int]:
-    """Insere um registro na tabela `documento_comprovante`.
+) -> Optional[str]:
+    """Insere um documento na collection `documento_comprovante`.
 
     Args:
         cpf: CPF do participante (será normalizado para 11 dígitos).
         tipo: 0=treinamento, 1=1º turno, 2=2º turno.
         nome_arquivo: nome original do arquivo enviado.
-        caminho_arquivo: caminho do arquivo salvo no storage.
+        gridfs_file_id: id (str) do PDF já gravado no GridFS.
         codigo_verificador: código verificador de autenticidade do documento.
         codigo_crc: código CRC de autenticidade do documento.
         url_conferencia: URL oficial de conferência da autenticidade.
@@ -329,7 +376,10 @@ def insert_documento_comprovante(
         evitar_duplicata: se True, não insere caso já exista CPF+tipo.
 
     Returns:
-        int | None: id do registro inserido, ou None se ignorado.
+        str | None: id do documento inserido, ou None se ignorado (duplicata).
+
+    Raises:
+        DatabaseError: se o gridfs_file_id for inválido ou a inserção falhar.
     """
     cpf_norm = sanitize_cpf(cpf) if cpf else None
 
@@ -340,21 +390,43 @@ def insert_documento_comprovante(
         )
         return None
 
-    query = """
-        INSERT INTO documento_comprovante
-            (cpf, tipo, nome_arquivo, caminho_arquivo, codigo_verificador,
-             codigo_crc, url_conferencia, assinatura_valida, dias_ganhos)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-        RETURNING id;
-    """
-    params = (
-        cpf_norm, tipo, nome_arquivo, caminho_arquivo, codigo_verificador,
-        codigo_crc, url_conferencia, assinatura_valida, dias_ganhos,
-    )
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(query, params)
-            novo_id = cur.fetchone()[0]
+    arquivo_oid: Optional[ObjectId] = None
+    if gridfs_file_id is not None:
+        try:
+            arquivo_oid = ObjectId(str(gridfs_file_id))
+        except (InvalidId, TypeError) as exc:
+            raise DatabaseError(
+                f"gridfs_file_id inválido: {gridfs_file_id!r}"
+            ) from exc
+
+    documento = {
+        "cpf": cpf_norm,
+        "tipo": tipo,
+        "nome_arquivo": nome_arquivo,
+        "gridfs_file_id": arquivo_oid,
+        "codigo_verificador": codigo_verificador,
+        "codigo_crc": codigo_crc,
+        "url_conferencia": url_conferencia,
+        "assinatura_valida": assinatura_valida,
+        "dias_ganhos": dias_ganhos,
+        "criado_em": _agora(),
+    }
+    banco = get_database()
+    try:
+        resultado = banco["documento_comprovante"].insert_one(documento)
+    except DuplicateKeyError:
+        logger.info(
+            "Documento comprobatório já existente (índice único) para CPF %s e tipo %s.",
+            cpf_norm, tipo,
+        )
+        return None
+    except PyMongoError as exc:
+        logger.error("Erro ao inserir documento comprobatório: %s", exc)
+        raise DatabaseError(
+            f"Falha ao inserir documento comprobatório: {exc}"
+        ) from exc
+
+    novo_id = str(resultado.inserted_id)
     logger.info(
         "Documento comprobatório inserido (id=%s, tipo=%s, cpf=%s, dias=%s).",
         novo_id, tipo, cpf_norm, dias_ganhos,
@@ -369,61 +441,149 @@ def buscar_documentos_cpf(cpf: str) -> list[dict]:
         cpf: CPF (com ou sem formatação).
 
     Returns:
-        list[dict]: uma entrada por documento, ordenada por tipo.
+        list[dict]: uma entrada por documento, ordenada por tipo. As chaves são
+            as mesmas da versão PostgreSQL, com ``gridfs_file_id`` no lugar de
+            ``caminho_arquivo``.
     """
     cpf_limpo = sanitize_cpf(cpf)
     if not cpf_limpo:
         return []
 
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT id, cpf, tipo, nome_arquivo, caminho_arquivo, "
-                "codigo_verificador, codigo_crc, url_conferencia, "
-                "assinatura_valida, dias_ganhos, criado_em "
-                "FROM documento_comprovante WHERE cpf = %s ORDER BY tipo",
-                (cpf_limpo,),
-            )
-            linhas = cur.fetchall()
+    banco = get_database()
+    try:
+        docs = banco["documento_comprovante"].find(
+            {"cpf": cpf_limpo},
+            {
+                "cpf": 1, "tipo": 1, "nome_arquivo": 1, "gridfs_file_id": 1,
+                "codigo_verificador": 1, "codigo_crc": 1, "url_conferencia": 1,
+                "assinatura_valida": 1, "dias_ganhos": 1, "criado_em": 1,
+            },
+        ).sort("tipo", pymongo.ASCENDING)
+        return [_mapear_documento(d) for d in docs]
+    except PyMongoError as exc:
+        raise DatabaseError(
+            f"Falha ao consultar documentos comprobatórios: {exc}"
+        ) from exc
 
-    colunas = [
-        "id", "cpf", "tipo", "nome_arquivo", "caminho_arquivo",
-        "codigo_verificador", "codigo_crc", "url_conferencia",
-        "assinatura_valida", "dias_ganhos", "criado_em",
-    ]
-    return [dict(zip(colunas, linha)) for linha in linhas]
+
+# ---------------------------------------------------------------------------
+# GridFS — armazenamento binário dos PDFs
+# ---------------------------------------------------------------------------
+def _gridfs(banco: "pymongo.database.Database") -> "gridfs.GridFSBucket":
+    """Retorna o bucket GridFS usado para os PDFs comprobatórios."""
+    return gridfs.GridFSBucket(banco, bucket_name=BUCKET_DOCUMENTOS)
+
+
+def upload_pdf(cpf: str, tipo: int, filename: str, file_bytes: bytes) -> str:
+    """Grava os bytes de um PDF no GridFS.
+
+    Args:
+        cpf: CPF do participante (já normalizado).
+        tipo: 0=treinamento, 1=1º turno, 2=2º turno.
+        filename: nome original do arquivo.
+        file_bytes: conteúdo binário do PDF.
+
+    Returns:
+        str: id do arquivo gravado no GridFS.
+
+    Raises:
+        DatabaseError: se a gravação falhar.
+    """
+    banco = get_database()
+    try:
+        arquivo_id = _gridfs(banco).upload_from_stream(
+            filename or "documento.pdf",
+            file_bytes,
+            metadata={"cpf": cpf, "tipo": tipo, "filename": filename},
+        )
+    except PyMongoError as exc:
+        logger.error("Erro ao gravar PDF no GridFS: %s", exc)
+        raise DatabaseError(f"Falha ao gravar o PDF no GridFS: {exc}") from exc
+
+    logger.info(
+        "PDF gravado no GridFS (id=%s, cpf=%s, tipo=%s).", arquivo_id, cpf, tipo
+    )
+    return str(arquivo_id)
+
+
+def apagar_pdf(arquivo_id: str) -> None:
+    """Apaga um arquivo do GridFS (melhor esforço — falhas são apenas logadas).
+
+    Usado na compensação quando a gravação dos metadados falha após o upload.
+    """
+    try:
+        banco = get_database()
+        _gridfs(banco).delete(ObjectId(str(arquivo_id)))
+        logger.info("Arquivo GridFS %s apagado.", arquivo_id)
+    except Exception as exc:  # noqa: BLE001 - compensação não deve propagar erro
+        logger.warning("Falha ao apagar arquivo GridFS %s: %s", arquivo_id, exc)
+
+
+def obter_pdf_documento(documento_id: str) -> Optional[bytes]:
+    """Retorna o conteúdo binário do PDF vinculado a um documento comprobatório.
+
+    Args:
+        documento_id: id (str) do documento na collection `documento_comprovante`.
+
+    Returns:
+        bytes | None: conteúdo do PDF, ou None se o documento/arquivo não existir.
+
+    Raises:
+        DatabaseError: se a leitura do GridFS falhar.
+    """
+    banco = get_database()
+    try:
+        registro = banco["documento_comprovante"].find_one(
+            {"_id": ObjectId(str(documento_id))}
+        )
+        if not registro or not registro.get("gridfs_file_id"):
+            return None
+        stream = io.BytesIO()
+        _gridfs(banco).download_to_stream(registro["gridfs_file_id"], stream)
+        return stream.getvalue()
+    except (PyMongoError, InvalidId) as exc:
+        logger.error("Erro ao obter PDF do documento %s: %s", documento_id, exc)
+        raise DatabaseError(f"Falha ao obter o PDF do documento: {exc}") from exc
 
 
 def registrar_comparecimento(cpf: str, tipo: int, data: Optional[date] = None) -> bool:
-    """Marca o comparecimento como realizado na tabela `conv`.
+    """Marca o comparecimento como realizado na collection `conv` (upsert).
 
-    Se já existir registro para o CPF+tipo, atualiza ``realizado`` para TRUE;
-    caso contrário, insere um novo registro já realizado.
+    Se já existir documento para o CPF+tipo, atualiza ``realizado`` para True;
+    caso contrário, cria um novo documento já realizado.
 
     Args:
         cpf: CPF da pessoa (com ou sem formatação).
         tipo: 0=treinamento, 1=1º turno, 2=2º turno.
-        data: data associada ao tipo (usada apenas em caso de inserção).
+        data: data associada ao tipo (usada apenas em caso de criação).
 
     Returns:
-        bool: True se o registro foi atualizado ou criado.
+        bool: True se o documento foi atualizado ou criado.
     """
     cpf_norm = sanitize_cpf(cpf)
     if not cpf_norm:
         return False
 
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "UPDATE conv SET realizado = TRUE WHERE cpf = %s AND tipo = %s;",
-                (cpf_norm, tipo),
-            )
-            if cur.rowcount == 0:
-                cur.execute(
-                    "INSERT INTO conv (cpf, tipo, data, realizado) "
-                    "VALUES (%s, %s, %s, TRUE);",
-                    (cpf_norm, tipo, data),
-                )
+    banco = get_database()
+    try:
+        banco["conv"].update_one(
+            {"cpf": cpf_norm, "tipo": tipo},
+            {
+                "$set": {"realizado": True},
+                "$setOnInsert": {
+                    "cpf": cpf_norm,
+                    "tipo": tipo,
+                    "data": data,
+                    "criado_em": _agora(),
+                },
+            },
+            upsert=True,
+        )
+    except PyMongoError as exc:
+        raise DatabaseError(
+            f"Falha ao registrar comparecimento: {exc}"
+        ) from exc
+
     logger.info(
         "Comparecimento registrado como REALIZADO (cpf=%s, tipo=%s).", cpf_norm, tipo
     )
@@ -436,8 +596,8 @@ def insert_conv(
     data: Optional[date] = None,
     realizado: bool = False,
     evitar_duplicata: bool = True,
-) -> Optional[int]:
-    """Insere um registro na tabela `conv` (controle de comparecimento).
+) -> Optional[str]:
+    """Insere um documento na collection `conv` (controle de comparecimento).
 
     Args:
         cpf: CPF da pessoa (será normalizado para 11 dígitos).
@@ -447,7 +607,7 @@ def insert_conv(
         evitar_duplicata: se True, não insere caso já exista CPF+tipo.
 
     Returns:
-        int | None: id do registro inserido, ou None se ignorado.
+        str | None: id do documento inserido, ou None se ignorado (duplicata).
     """
     cpf_norm = sanitize_cpf(cpf) if cpf else None
 
@@ -458,15 +618,29 @@ def insert_conv(
         )
         return None
 
-    query = """
-        INSERT INTO conv (cpf, tipo, data, realizado)
-        VALUES (%s, %s, %s, %s)
-        RETURNING id;
-    """
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(query, (cpf_norm, tipo, data, realizado))
-            novo_id = cur.fetchone()[0]
+    documento = {
+        "cpf": cpf_norm,
+        "tipo": tipo,
+        "data": data,
+        "realizado": realizado,
+        "criado_em": _agora(),
+    }
+    banco = get_database()
+    try:
+        resultado = banco["conv"].insert_one(documento)
+    except DuplicateKeyError:
+        logger.info(
+            "Registro de comparecimento já existente (índice único) para CPF %s e tipo %s.",
+            cpf_norm, tipo,
+        )
+        return None
+    except PyMongoError as exc:
+        logger.error("Erro ao inserir registro de comparecimento: %s", exc)
+        raise DatabaseError(
+            f"Falha ao inserir registro de comparecimento: {exc}"
+        ) from exc
+
+    novo_id = str(resultado.inserted_id)
     logger.info(
         "Registro de comparecimento inserido (id=%s, tipo=%s, cpf=%s).",
         novo_id, tipo, cpf_norm,
