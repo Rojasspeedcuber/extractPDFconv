@@ -68,7 +68,7 @@ def get_database() -> "pymongo.database.Database":
     """
     try:
         cliente = pymongo.MongoClient(get_mongo_uri(), serverSelectionTimeoutMS=5000)
-        return cliente.get_default_database(default_db_name=NOME_BANCO_PADRAO)
+        return cliente.get_default_database(default=NOME_BANCO_PADRAO)
     except PyMongoError as exc:
         logger.error("Erro ao conectar ao MongoDB: %s", exc)
         raise DatabaseError(f"Falha na conexão com o MongoDB: {exc}") from exc
