@@ -22,22 +22,20 @@ class Settings:
     
     # Diretório temporário de armazenamento
     STORAGE_DIR: Path = Path(os.getenv("STORAGE_DIR", "storage/temp"))
-
-    # Diretório definitivo dos documentos comprobatórios enviados por upload
-    DOCUMENTS_DIR: Path = Path(os.getenv("DOCUMENTS_DIR", "storage/documentos"))
     
     # Variáveis futuras para extensões (OCR / IA / Nuvem)
     GOOGLE_API_KEY: str | None = os.getenv("GOOGLE_API_KEY")
 
-    # --- Integração com banco de dados PostgreSQL ---
-    # URL de conexão do PostgreSQL (ex.: postgresql://user:senha@host:5432/banco)
-    DATABASE_URL: str | None = os.getenv("DATABASE_URL")
+    # --- Integração com banco de dados MongoDB ---
+    # URI de conexão do MongoDB. O nome do banco vem do path da URI
+    # (ex.: mongodb://usuario:senha@host:27017/convocacoes). Sem path, usa "convocacoes".
+    MONGO_URI: str | None = os.getenv("MONGO_URI")
 
     # Ativa a persistência automática dos dados extraídos no banco.
-    # Por padrão fica habilitada quando existe uma DATABASE_URL configurada.
+    # Por padrão fica habilitada quando existe uma MONGO_URI configurada.
     PERSIST_TO_DB: bool = os.getenv(
         "PERSIST_TO_DB",
-        "true" if os.getenv("DATABASE_URL") else "false",
+        "true" if os.getenv("MONGO_URI") else "false",
     ).lower() in ("true", "1", "yes")
 
     # --- Keycloak (autenticação) ---
@@ -51,4 +49,3 @@ settings = Settings()
 
 # Garante que os diretórios de armazenamento existam
 settings.STORAGE_DIR.mkdir(parents=True, exist_ok=True)
-settings.DOCUMENTS_DIR.mkdir(parents=True, exist_ok=True)
