@@ -74,10 +74,10 @@ def _persistir_no_banco(
     extraction_result: ExtractionResult,
     cpf_usuario: str | None = None,
 ) -> None:
-    """Persiste os dados extraídos no PostgreSQL, se a integração estiver ativa.
+    """Persiste os dados extraídos no MongoDB, se a integração estiver ativa.
 
     A persistência só ocorre quando:
-      - settings.PERSIST_TO_DB está habilitado (DATABASE_URL configurada), e
+      - settings.PERSIST_TO_DB está habilitado (MONGO_URI configurada), e
       - a extração foi concluída com sucesso e possui dados.
 
     Args:
@@ -96,7 +96,7 @@ def _persistir_no_banco(
         return
 
     try:
-        # Importação tardia para não exigir psycopg2 quando a integração está desativada.
+        # Importação tardia para não exigir pymongo quando a integração está desativada.
         from database.persistence_service import persistir_extracao
 
         resumo = persistir_extracao(extraction_result.data, cpf_usuario=cpf_usuario)
@@ -116,7 +116,7 @@ def _persistir_no_banco(
             extraction_result.data["_persistencia_banco"] = resumo
     except ImportError as exc:
         logger.error(
-            "Dependências de banco de dados ausentes (instale psycopg2-binary): %s", exc
+            "Dependências de banco de dados ausentes (instale pymongo): %s", exc
         )
     except Exception as exc:  # noqa: BLE001 - falha de banco não deve quebrar o app
         logger.error("Erro inesperado ao persistir dados no banco: %s", exc, exc_info=True)
@@ -179,7 +179,7 @@ class ProcessingService:
             # 3.0. Inclui o CPF informado no login entre os CPFs detectados
             _incluir_cpf_do_usuario(extraction_result, cpf_usuario)
 
-            # 3.1. Persiste automaticamente os dados extraídos no PostgreSQL
+            # 3.1. Persiste automaticamente os dados extraídos no MongoDB
             update_progress("Salvando dados no banco de dados...", 0.90)
             _persistir_no_banco(extraction_result, cpf_usuario=cpf_usuario)
 

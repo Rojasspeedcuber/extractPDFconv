@@ -288,7 +288,7 @@ def render_registros_usuario() -> None:
         from database.db import buscar_registros_cpf
         registros = buscar_registros_cpf(cpf)
     except ImportError:
-        st.warning("🗄️ Integração com o banco indisponível (psycopg2 não instalado).")
+        st.warning("🗄️ Integração com o banco indisponível (pymongo não instalado).")
         return
     except Exception as exc:  # noqa: BLE001 - não deve quebrar a interface
         st.warning(f"🗄️ Não foi possível consultar o banco: {exc}")

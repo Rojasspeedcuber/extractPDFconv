@@ -1,7 +1,7 @@
-"""Ingestão de PDFs via linha de comando: extrai e grava no PostgreSQL.
+"""Ingestão de PDFs via linha de comando: extrai e grava no MongoDB.
 
 Uso:
-    # Criar/verificar as tabelas no banco (executa database/schema.sql)
+    # Criar/verificar os índices das collections (ensure_indexes)
     python ingest_pdfs.py --init-db
 
     # Testar a conexão com o banco
@@ -13,7 +13,7 @@ Uso:
     # Processar todos os PDFs de uma pasta
     python ingest_pdfs.py caminho/para/pasta_de_pdfs/
 
-Requer a variável de ambiente DATABASE_URL configurada (veja .env.example).
+Requer a variável de ambiente MONGO_URI configurada (veja .env.example).
 """
 from __future__ import annotations
 
@@ -58,7 +58,7 @@ def _processar_arquivo(pdf_path: Path) -> bool:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Extrai dados de PDFs de convocação e grava no PostgreSQL."
+        description="Extrai dados de PDFs de convocação e grava no MongoDB."
     )
     parser.add_argument(
         "caminho",
@@ -68,7 +68,7 @@ def main() -> int:
     parser.add_argument(
         "--init-db",
         action="store_true",
-        help="Cria/verifica as tabelas no banco (executa database/schema.sql).",
+        help="Cria/verifica os índices das collections no MongoDB.",
     )
     parser.add_argument(
         "--test-conn",
@@ -85,8 +85,8 @@ def main() -> int:
         return 0 if ok else 1
 
     if args.init_db:
-        db.init_schema()
-        print("Schema criado/verificado com sucesso.")
+        db.ensure_indexes()
+        print("Índices criados/verificados com sucesso.")
         if not args.caminho:
             return 0
 

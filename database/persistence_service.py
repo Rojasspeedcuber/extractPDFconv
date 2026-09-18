@@ -1,7 +1,7 @@
 """Serviço de persistência: mapeia os dados extraídos dos PDFs para o banco.
 
 Este módulo faz a ponte entre o resultado da extração (ExtractionResult.data)
-e as tabelas do PostgreSQL (`instrumento_convocacao` e `conv`).
+e as collections do MongoDB (`instrumento_convocacao` e `conv`).
 
 Convenção do campo "tipo":
     0 = Treinamento (28/08)
@@ -105,11 +105,11 @@ def persistir_extracao(
     data: dict[str, Any],
     cpf_usuario: str | None = None,
 ) -> dict[str, Any]:
-    """Persiste os dados extraídos de um PDF nas tabelas do PostgreSQL.
+    """Persiste os dados extraídos de um PDF nas collections do MongoDB.
 
     Para cada tipo de convocação identificado (treinamento, 1º turno, 2º turno),
-    cria (quando aplicável) um registro em `instrumento_convocacao` e um registro
-    de controle em `conv`.
+    cria (quando aplicável) um documento em `instrumento_convocacao` e um
+    documento de controle em `conv`.
 
     Estratégia de definição do CPF:
         1. Tenta extrair o CPF do próprio PDF (``_primeiro_cpf``).
