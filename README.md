@@ -9,7 +9,7 @@ Aplicação web desenvolvida **100% em Python** com **Streamlit** para upload, v
 - **Linguagem:** Python 3.12+ (compatível com 3.10+)
 - **Interface Web:** Streamlit
 - **Motor de Extração de PDF:** pypdf
-- **Banco de Dados:** PostgreSQL (via `psycopg2-binary`)
+- **Banco de Dados:** MongoDB (via `pymongo`) — PDFs armazenados no **GridFS**
 - **Gestão de Ambiente:** python-dotenv
 - **Testes Automatizados:** pytest
 - **Containerização:** Docker & Docker Compose
@@ -41,11 +41,10 @@ O projeto segue estrita separação de responsabilidades em camadas desacopladas
 │   ├── __init__.py
 │   ├── document.py             # Informações e metadados do documento
 │   └── extraction.py           # Contrato de resultado da extração
-├── database/                   # Integração com o banco de dados PostgreSQL
+├── database/                   # Integração com o banco de dados MongoDB
 │   ├── __init__.py
-│   ├── schema.sql              # DDL das tabelas (instrumento_convocacao e conv)
-│   ├── db.py                   # Conexão, inserções e verificação de duplicatas
-│   └── persistence_service.py  # Mapeia os dados extraídos para as tabelas
+│   ├── db.py                   # Conexão, índices, CRUD e GridFS (PDFs)
+│   └── persistence_service.py  # Mapeia os dados extraídos para as collections
 ├── ingest_pdfs.py              # CLI para extrair PDFs e gravar no banco (lote)
 ├── utils/                      # Funções utilitárias
 │   ├── __init__.py
@@ -96,15 +95,16 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Edite o arquivo `.env` e informe, principalmente, a URL de conexão do banco:
+Edite o arquivo `.env` e informe, principalmente, a URI de conexão do banco:
 
 ```dotenv
-DATABASE_URL=postgresql://usuario:senha@host:5432/nome_do_banco
+MONGO_URI=mongodb://usuario:senha@host:27017/nome_do_banco
 PERSIST_TO_DB=true
 ```
 
-> Se `DATABASE_URL` não for definida, a aplicação continua funcionando normalmente,
-> apenas **sem** gravar os dados no banco (`PERSIST_TO_DB` fica desativado por padrão).
+> Se `MONGO_URI` não for definida, a extração continua funcionando, mas o
+> **upload de comprovantes é recusado** — os PDFs são armazenados apenas no
+> MongoDB (GridFS), sem gravação em disco.
 
 ### 4. Executar a aplicação
 
@@ -116,50 +116,45 @@ Acesse no navegador: `http://localhost:8501` (ou `http://localhost:3000` conform
 
 ---
 
-## 🗄️ Integração com Banco de Dados PostgreSQL
+## 🗄️ Integração com Banco de Dados MongoDB
 
 A aplicação grava automaticamente os dados extraídos das cartas convocatórias em um
-banco **PostgreSQL** já existente, em duas tabelas:
+banco **MongoDB**, em três collections:
 
-### Tabelas
+### Collections
 
 **`instrumento_convocacao`** — registro de cada instrumento/carta de convocação:
 
-| Coluna             | Tipo         | Descrição                                            |
-|--------------------|--------------|------------------------------------------------------|
-| `id`               | SERIAL (PK)  | Identificador autoincremental                        |
-| `tipo`             | INTEGER      | `0` = treinamento (28/08), `1` = 1º turno, `2` = 2º turno |
-| `data`             | DATE         | Data associada ao tipo de convocação                 |
-| `responsavel`      | TEXT         | Responsável/assinante do instrumento                 |
-| `convocado_cpf`    | VARCHAR(11)  | CPF do convocado (apenas dígitos)                    |
-| `orgao_convocador` | TEXT         | Órgão que emitiu a convocação                        |
+| Campo              | Tipo     | Descrição                                                 |
+|--------------------|----------|-----------------------------------------------------------|
+| `_id`              | ObjectId | Identificador único                                       |
+| `tipo`             | int      | `0` = treinamento (28/08), `1` = 1º turno, `2` = 2º turno |
+| `data`             | date     | Data associada ao tipo de convocação                      |
+| `responsavel`      | string   | Responsável/assinante do instrumento                      |
+| `convocado_cpf`    | string   | CPF do convocado (apenas dígitos)                         |
+| `orgao_convocador` | string   | Órgão que emitiu a convocação                             |
 
 **`conv`** — controle de comparecimento por convocação:
 
-| Coluna      | Tipo         | Descrição                                            |
-|-------------|--------------|------------------------------------------------------|
-| `id`        | SERIAL (PK)  | Identificador autoincremental                        |
-| `cpf`       | VARCHAR(11)  | CPF da pessoa (apenas dígitos)                       |
-| `tipo`      | INTEGER      | `0` = treinamento, `1` = 1º turno, `2` = 2º turno    |
-| `data`      | DATE         | Data associada ao tipo                               |
-| `realizado` | BOOLEAN      | Se o comparecimento foi realizado (padrão `false`)   |
+| Campo       | Tipo     | Descrição                                              |
+|-------------|----------|--------------------------------------------------------|
+| `_id`       | ObjectId | Identificador único                                    |
+| `cpf`       | string   | CPF da pessoa (apenas dígitos)                         |
+| `tipo`      | int      | `0` = treinamento, `1` = 1º turno, `2` = 2º turno      |
+| `data`      | date     | Data associada ao tipo                                 |
+| `realizado` | bool     | Se o comparecimento foi realizado (padrão `false`)     |
 
-### Criar as tabelas no banco
+**`documento_comprovante`** — metadados dos PDFs comprobatórios. O arquivo em si
+fica no **GridFS** (bucket `documentos`), referenciado pelo campo `gridfs_file_id`.
 
-Você pode criar/verificar as tabelas de duas formas:
+### Criar os índices no banco
 
-**Opção A — via CLI do projeto:**
 ```bash
 python ingest_pdfs.py --init-db
 ```
 
-**Opção B — diretamente com o `psql`:**
-```bash
-psql "$DATABASE_URL" -f database/schema.sql
-```
-
-O script usa `CREATE TABLE IF NOT EXISTS`, portanto é seguro executá-lo em um banco
-já existente sem apagar dados.
+A operação é **idempotente**: cria índices únicos `(cpf, tipo)` /
+`(convocado_cpf, tipo)` e pode ser repetida sem apagar dados.
 
 ### Como os dados são gravados
 
@@ -182,8 +177,9 @@ python ingest_pdfs.py caminho/para/pasta_de_pdfs/
 ### Prevenção de duplicatas
 
 Antes de inserir, o sistema verifica se já existe registro para o mesmo **CPF + tipo**
-em cada tabela. Se já existir, a inserção é **ignorada** (não duplica), e isso é
-informado nos logs e no resumo de processamento.
+em cada collection. Se já existir, a inserção é **ignorada** (não duplica), e isso é
+informado nos logs e no resumo de processamento. Índices **únicos** no MongoDB
+garantem a integridade mesmo em condições de corrida.
 
 ---
 
@@ -210,8 +206,9 @@ A aba **"Participação nas Eleições"** permite que o eleitor envie os documen
 Total máximo possível: **9 dias** (1 + 4 + 4). Cada parcela só é somada quando o
 respectivo documento foi enviado e considerado válido.
 
-Os comprovantes válidos são gravados na tabela **`documento_comprovante`** e o
-comparecimento correspondente é marcado como **realizado** na tabela `conv`.
+Os comprovantes válidos são gravados no **GridFS** (PDF) e na collection
+**`documento_comprovante`** (metadados); o comparecimento correspondente é
+marcado como **realizado** na collection `conv`.
 
 ---
 
@@ -249,6 +246,13 @@ docker run -d -p 8501:8501 --name pdf_app pdf-extractor
 ### Com Docker Compose:
 ```bash
 docker compose up -d
+```
+
+O compose sobe o **MongoDB 7** (`mongo_convocacoes`, porta 27017) junto com a aplicação.
+Na primeira execução, crie os índices com:
+
+```bash
+docker compose exec pdf-extractor python ingest_pdfs.py --init-db
 ```
 
 ---
