@@ -100,6 +100,7 @@ def salvar_documento_comprovante(
         "persistido": False,
         "duplicado": False,
         "erro": None,
+        "aviso": None,
     }
 
     if not isinstance(report, AuthenticityReport) or not report.valido:
@@ -156,8 +157,8 @@ def salvar_documento_comprovante(
         logger.error(resumo["erro"], exc_info=True)
         return resumo
 
-    # 2. Registra os metadados e marca o comparecimento como realizado.
-    #    Em caso de falha, apaga o arquivo recém-gravado (compensação).
+    # 2. Registra os metadados; em caso de falha, apaga o arquivo recém-gravado
+    #    (compensação do órfão no GridFS).
     try:
         novo_id = db.insert_documento_comprovante(
             cpf=cpf_norm,
@@ -170,25 +171,36 @@ def salvar_documento_comprovante(
             assinatura_valida=report.possui_assinatura,
             dias_ganhos=resumo["dias"],
         )
-        if novo_id is None:
-            # Duplicata detectada pelo índice único após a gravação do PDF
-            db.apagar_pdf(arquivo_id)
-            resumo["gridfs_file_id"] = None
-            resumo["duplicado"] = True
-            resumo["erro"] = (
-                f"Já existe um documento comprobatório registrado para "
-                f"{LABELS_POR_TIPO[tipo]}. O envio foi ignorado (sem duplicatas)."
-            )
-            logger.info(resumo["erro"])
-            return resumo
-        resumo["persistido"] = True
-        db.registrar_comparecimento(cpf_norm, tipo, data_evento)
-    except Exception as exc:  # noqa: BLE001 - falha total: remove o órfão
+    except Exception as exc:  # noqa: BLE001 - remove o órfão do GridFS
         db.apagar_pdf(arquivo_id)
         resumo["gridfs_file_id"] = None
         resumo["erro"] = f"PDF gravado, porém falha ao registrar os metadados: {exc}"
         logger.error(resumo["erro"], exc_info=True)
         return resumo
+
+    if novo_id is None:
+        # Duplicata detectada pelo índice único após a gravação do PDF
+        db.apagar_pdf(arquivo_id)
+        resumo["gridfs_file_id"] = None
+        resumo["duplicado"] = True
+        resumo["erro"] = (
+            f"Já existe um documento comprobatório registrado para "
+            f"{LABELS_POR_TIPO[tipo]}. O envio foi ignorado (sem duplicatas)."
+        )
+        logger.info(resumo["erro"])
+        return resumo
+
+    resumo["persistido"] = True
+
+    # 3. Marca o comparecimento como realizado. O documento já está persistido:
+    #    uma falha aqui não descarta o PDF nem os metadados (apenas avisa).
+    try:
+        db.registrar_comparecimento(cpf_norm, tipo, data_evento)
+    except Exception as exc:  # noqa: BLE001
+        resumo["aviso"] = (
+            f"Documento armazenado, porém falha ao registrar o comparecimento: {exc}"
+        )
+        logger.error(resumo["aviso"])
 
     resumo["sucesso"] = True
     return resumo

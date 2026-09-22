@@ -159,6 +159,9 @@ def _processar_upload(uploaded, tipo: int) -> None:
         "persistido": resumo.get("persistido", False),
     }
 
+    if resumo.get("aviso"):
+        st.warning(f"⚠️ {resumo['aviso']}")
+
     persistido_txt = "Documento gravado no MongoDB (GridFS)."
     st.success(
         f"📦 Documento armazenado com sucesso! Você ganhou "

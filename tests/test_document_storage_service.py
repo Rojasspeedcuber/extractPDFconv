@@ -196,6 +196,23 @@ def test_falha_nos_metadados_apaga_arquivo_orfao(db_falso, monkeypatch):
     assert not db_falso["arquivos"]
 
 
+def test_falha_no_comparecimento_nao_descarta_documento_persistido(db_falso, monkeypatch):
+    def fake_registrar_quebrado(cpf, tipo, data=None):
+        raise db_mod.DatabaseError("falha ao registrar comparecimento")
+
+    monkeypatch.setattr(db_mod, "registrar_comparecimento", fake_registrar_quebrado)
+    resumo = salvar_documento_comprovante(
+        cpf_usuario=CPF_TESTE, tipo=1, file_bytes=_pdf_bytes(),
+        filename="a.pdf", report=_report_valido(),
+    )
+    assert resumo["sucesso"] is True
+    assert resumo["persistido"] is True
+    assert not db_falso["apagados"]
+    assert resumo["gridfs_file_id"] in db_falso["arquivos"]
+    assert (CPF_TESTE, 1) in db_falso["documentos"]
+    assert "comparecimento" in (resumo.get("aviso") or "").lower()
+
+
 def test_persistencia_desativada_recusa_upload(db_falso, monkeypatch):
     monkeypatch.setattr(settings, "PERSIST_TO_DB", False)
     resumo = salvar_documento_comprovante(
